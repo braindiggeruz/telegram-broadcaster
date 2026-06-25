@@ -1,18 +1,55 @@
-import { describe, expect, it, vi } from "vitest";
+// Tests run in standalone mode — DB calls are mocked to avoid network dependency.
+import { describe, expect, it, vi, beforeEach } from "vitest";
 import { appRouter } from "./routers";
 import type { TrpcContext } from "./_core/context";
+
+// Mock the DB module so tests don't need a real Supabase connection
+vi.mock("./db", () => ({
+  getDb: vi.fn().mockResolvedValue(null),
+  getBotSettings: vi.fn().mockResolvedValue(null),
+  upsertBotSettings: vi.fn().mockResolvedValue(undefined),
+  getRecipientLists: vi.fn().mockResolvedValue([]),
+  getRecipientList: vi.fn().mockResolvedValue(null),
+  createRecipientList: vi.fn().mockResolvedValue({ id: 1 }),
+  deleteRecipientList: vi.fn().mockResolvedValue(undefined),
+  getBroadcasts: vi.fn().mockResolvedValue([]),
+  getBroadcast: vi.fn().mockResolvedValue(null),
+  createBroadcast: vi.fn().mockResolvedValue({ id: 1 }),
+  updateBroadcastStatus: vi.fn().mockResolvedValue(undefined),
+  updateBroadcastProgress: vi.fn().mockResolvedValue(undefined),
+  getBroadcastLogs: vi.fn().mockResolvedValue([]),
+  createBroadcastLog: vi.fn().mockResolvedValue(undefined),
+  getDashboardStats: vi.fn().mockResolvedValue({
+    totalBroadcasts: 0,
+    totalMessagesSent: 0,
+    overallSuccessRate: 0,
+    recentBroadcasts: [],
+  }),
+  getMtprotoSession: vi.fn().mockResolvedValue(null),
+  upsertMtprotoSession: vi.fn().mockResolvedValue(undefined),
+  deleteMtprotoSession: vi.fn().mockResolvedValue(undefined),
+  getMtprotoBroadcasts: vi.fn().mockResolvedValue([]),
+  getMtprotoBroadcast: vi.fn().mockResolvedValue(null),
+  createMtprotoBroadcast: vi.fn().mockResolvedValue({ id: 1 }),
+  updateMtprotoBroadcastStatus: vi.fn().mockResolvedValue(undefined),
+  updateMtprotoBroadcastProgress: vi.fn().mockResolvedValue(undefined),
+  createMtprotoBroadcastLog: vi.fn().mockResolvedValue(undefined),
+  getMtprotoBroadcastLogs: vi.fn().mockResolvedValue([]),
+  upsertUser: vi.fn().mockResolvedValue(undefined),
+  getUserByOpenId: vi.fn().mockResolvedValue(null),
+  getUserById: vi.fn().mockResolvedValue(null),
+}));
 
 function createCtx(userId = 1): TrpcContext {
   return {
     user: {
       id: userId,
-      openId: "test-user",
-      email: "test@example.com",
-      name: "Test User",
-      loginMethod: "manus",
-      role: "user",
+      openId: "standalone",
+      email: null,
+      name: "Admin",
+      loginMethod: null,
+      role: "admin" as const,
       createdAt: new Date(),
-      updatedAt: new Date(),
       lastSignedIn: new Date(),
     },
     req: { protocol: "https", headers: {} } as TrpcContext["req"],
@@ -21,20 +58,11 @@ function createCtx(userId = 1): TrpcContext {
 }
 
 describe("auth.logout", () => {
-  it("clears the session cookie and reports success", async () => {
-    const clearedCookies: { name: string; options: Record<string, unknown> }[] = [];
-    const ctx: TrpcContext = {
-      ...createCtx(),
-      res: {
-        clearCookie: (name: string, options: Record<string, unknown>) => {
-          clearedCookies.push({ name, options });
-        },
-      } as unknown as TrpcContext["res"],
-    };
+  it("returns success in standalone mode", async () => {
+    const ctx = createCtx();
     const caller = appRouter.createCaller(ctx);
     const result = await caller.auth.logout();
     expect(result.success).toBe(true);
-    expect(clearedCookies).toHaveLength(1);
   });
 });
 

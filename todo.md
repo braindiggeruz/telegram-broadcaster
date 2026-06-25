@@ -35,13 +35,13 @@
 - [x] Final checkpoint
 
 ## Phase 7: MTProto User Account Broadcasting
-- [ ] Install telegram (GramJS) npm package
-- [ ] Add mtproto_sessions table to drizzle schema
-- [ ] Add MTProto DB helpers (save/get/delete session)
-- [ ] Backend: mtproto router — sendCode, signIn, signInQR, checkSession, logout, getMe
-- [ ] Backend: mtproto broadcast router — create & launch via user account, progress, cancel
-- [ ] Frontend: MTProto Account page — phone input, SMS/QR auth flow, session status card
-- [ ] Frontend: MTProto Broadcast page — launch with user account, real-time progress
-- [ ] Add "User Account" section to sidebar navigation
-- [ ] Vitest tests for mtproto routers
-- [ ] Final checkpoint
+- [x] Install telegram (GramJS) npm package
+- [x] Add mtproto_sessions table to drizzle schema
+- [x] Add MTProto DB helpers (save/get/delete session)
+- [x] Backend: mtproto router — sendCode, signIn, signInQR, checkSession, logout, getMe
+- [x] Backend: mtproto broadcast router — create & launch via user account, progress, cancel
+- [x] Frontend: MTProto Account page — phone input, SMS/QR auth flow, session status card
+- [x] Frontend: MTProto Broadcast page — launch with user account, real-time progress
+- [x] Add "User Account" section to sidebar navigation
+- [x] Vitest tests for mtproto routers
+- [x] Final checkpoint — standalone mode, no Manus OAuth
