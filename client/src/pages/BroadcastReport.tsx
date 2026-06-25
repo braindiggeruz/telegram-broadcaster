@@ -1,6 +1,4 @@
 import { trpc } from "@/lib/trpc";
-import { useAuth } from "@/_core/hooks/useAuth";
-import { getLoginUrl } from "@/const";
 import { Link, useParams } from "wouter";
 import {
   ArrowLeft, Download, CheckCircle2, XCircle, Clock, Loader2, Send,
@@ -23,15 +21,12 @@ function StatusBadge({ status }: { status: string }) {
 export default function BroadcastReport() {
   const { id } = useParams<{ id: string }>();
   const broadcastId = parseInt(id ?? "0", 10);
-  const { isAuthenticated, loading: authLoading } = useAuth();
 
   const { data: broadcast, isLoading: bcLoading } = trpc.broadcast.get.useQuery(
-    { id: broadcastId },
-    { enabled: isAuthenticated && !!broadcastId }
+    { id: broadcastId }, { enabled: !!broadcastId }
   );
   const { data: logs, isLoading: logsLoading } = trpc.broadcast.getLogs.useQuery(
-    { id: broadcastId },
-    { enabled: isAuthenticated && !!broadcastId }
+    { id: broadcastId }, { enabled: !!broadcastId }
   );
 
   const handleDownload = () => {
@@ -67,21 +62,6 @@ export default function BroadcastReport() {
     a.click();
     URL.revokeObjectURL(url);
   };
-
-  if (authLoading || bcLoading) {
-    return <div className="flex h-full items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-primary" /></div>;
-  }
-
-  if (!isAuthenticated) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
-        <p className="text-muted-foreground">Please sign in to view broadcast reports.</p>
-        <a href={getLoginUrl()} className="inline-flex items-center gap-2 rounded-xl gradient-primary px-5 py-2.5 text-sm font-semibold text-white">
-          Sign in
-        </a>
-      </div>
-    );
-  }
 
   if (!broadcast) {
     return (

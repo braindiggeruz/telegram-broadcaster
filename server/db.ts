@@ -6,10 +6,20 @@ import { ENV } from "./_core/env";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
+function getPostgresUrl(): string | undefined {
+  // Prefer SUPABASE_DATABASE_URL (explicit Supabase connection)
+  if (process.env.SUPABASE_DATABASE_URL) return process.env.SUPABASE_DATABASE_URL;
+  // Fall back to DATABASE_URL only if it's PostgreSQL (not MySQL)
+  const url = process.env.DATABASE_URL;
+  if (url && url.startsWith('postgresql')) return url;
+  return undefined;
+}
+
 export async function getDb() {
-  if (!_db && process.env.DATABASE_URL) {
+  const pgUrl = getPostgresUrl();
+  if (!_db && pgUrl) {
     try {
-      const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+      const pool = new Pool({ connectionString: pgUrl, ssl: { rejectUnauthorized: false } });
       _db = drizzle(pool);
     } catch (error) {
       console.warn("[Database] Failed to connect:", error);

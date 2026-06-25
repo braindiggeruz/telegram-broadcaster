@@ -1,6 +1,4 @@
 import { trpc } from "@/lib/trpc";
-import { useAuth } from "@/_core/hooks/useAuth";
-import { getLoginUrl } from "@/const";
 import { Link } from "wouter";
 import {
   History, Send, CheckCircle2, XCircle, Clock, Loader2, ArrowRight,
@@ -21,21 +19,7 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 export default function BroadcastHistory() {
-  const { isAuthenticated, loading: authLoading } = useAuth();
-  const { data: broadcasts, isLoading } = trpc.broadcast.list.useQuery(undefined, { enabled: isAuthenticated });
-
-  if (authLoading) return <div className="flex h-full items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-primary" /></div>;
-
-  if (!isAuthenticated) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
-        <p className="text-muted-foreground">Please sign in to view broadcast history.</p>
-        <a href={getLoginUrl()} className="inline-flex items-center gap-2 rounded-xl gradient-primary px-5 py-2.5 text-sm font-semibold text-white">
-          Sign in <ArrowRight className="h-4 w-4" />
-        </a>
-      </div>
-    );
-  }
+  const { data: broadcasts, isLoading } = trpc.broadcast.list.useQuery(undefined);
 
   return (
     <div className="p-6 lg:p-8 max-w-5xl mx-auto space-y-6">

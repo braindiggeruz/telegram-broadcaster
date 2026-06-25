@@ -1,7 +1,5 @@
 import { useState, useRef, useCallback } from "react";
 import { trpc } from "@/lib/trpc";
-import { useAuth } from "@/_core/hooks/useAuth";
-import { getLoginUrl } from "@/const";
 import {
   Users, Upload, FileJson, FileText, Trash2, Eye, EyeOff, Loader2,
   ArrowRight, CheckCircle2, AlertCircle, Hash, X
@@ -81,14 +79,12 @@ function FileUploadZone({ onFile }: { onFile: (name: string, content: string, ty
 }
 
 export default function Recipients() {
-  const { isAuthenticated, loading: authLoading } = useAuth();
   const [preview, setPreview] = useState<{ name: string; content: string; type: "json" | "csv" } | null>(null);
   const [parsedIds, setParsedIds] = useState<string[]>([]);
   const [showPreviewIds, setShowPreviewIds] = useState(false);
   const [expandedList, setExpandedList] = useState<number | null>(null);
 
   const { data: lists, isLoading, refetch } = trpc.recipients.list.useQuery(undefined, {
-    enabled: isAuthenticated,
   });
 
   const uploadMutation = trpc.recipients.upload.useMutation({
@@ -128,19 +124,6 @@ export default function Recipients() {
       setParsedIds([]);
     }
   };
-
-  if (authLoading) return <div className="flex h-full items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-primary" /></div>;
-
-  if (!isAuthenticated) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
-        <p className="text-muted-foreground">Please sign in to manage recipient lists.</p>
-        <a href={getLoginUrl()} className="inline-flex items-center gap-2 rounded-xl gradient-primary px-5 py-2.5 text-sm font-semibold text-white">
-          Sign in <ArrowRight className="h-4 w-4" />
-        </a>
-      </div>
-    );
-  }
 
   return (
     <div className="p-6 lg:p-8 max-w-3xl mx-auto space-y-6">

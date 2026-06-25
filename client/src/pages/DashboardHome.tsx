@@ -1,9 +1,7 @@
 import { trpc } from "@/lib/trpc";
-import { useAuth } from "@/_core/hooks/useAuth";
-import { getLoginUrl } from "@/const";
 import { Link } from "wouter";
 import {
-  Send, Users, CheckCircle2, TrendingUp, Rocket, Bot, MessageSquare, History,
+  Send, Users, TrendingUp, Rocket, Bot, MessageSquare, History,
   ArrowRight, Clock, AlertCircle, CheckCircle, XCircle, Loader2, RefreshCw
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -51,42 +49,9 @@ function StatCard({ icon: Icon, label, value, sub, gradient }: {
 }
 
 export default function DashboardHome() {
-  const { user, loading: authLoading, isAuthenticated } = useAuth();
   const { data: stats, isLoading, refetch } = trpc.stats.dashboard.useQuery(undefined, {
-    enabled: isAuthenticated,
     refetchInterval: 10000,
   });
-
-  if (authLoading) {
-    return (
-      <div className="flex h-full items-center justify-center">
-        <Loader2 className="h-8 w-8 animate-spin text-primary" />
-      </div>
-    );
-  }
-
-  if (!isAuthenticated) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-6 p-8 text-center">
-        <div className="flex h-16 w-16 items-center justify-center rounded-2xl gradient-primary glow-primary">
-          <Send className="h-8 w-8 text-white" />
-        </div>
-        <div>
-          <h1 className="text-2xl font-bold text-foreground">Telegram Broadcaster</h1>
-          <p className="text-muted-foreground mt-2 max-w-sm">
-            Professional broadcast management for Telegram bots. Sign in to get started.
-          </p>
-        </div>
-        <a
-          href={getLoginUrl()}
-          className="inline-flex items-center gap-2 rounded-xl gradient-primary px-6 py-3 text-sm font-semibold text-white shadow-lg hover:opacity-90 transition-opacity"
-        >
-          Sign in to continue
-          <ArrowRight className="h-4 w-4" />
-        </a>
-      </div>
-    );
-  }
 
   const totalBroadcasts = stats?.totalBroadcasts ?? 0;
   const totalMessagesSent = stats?.totalMessagesSent ?? 0;
@@ -100,7 +65,7 @@ export default function DashboardHome() {
         <div>
           <h1 className="text-2xl font-bold text-foreground">Dashboard</h1>
           <p className="text-sm text-muted-foreground mt-0.5">
-            Welcome back{user?.name ? `, ${user.name}` : ""}. Here's your broadcast overview.
+            Telegram Broadcaster — обзор рассылок.
           </p>
         </div>
         <button

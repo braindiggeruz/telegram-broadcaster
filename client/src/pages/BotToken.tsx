@@ -1,7 +1,5 @@
 import { useState } from "react";
 import { trpc } from "@/lib/trpc";
-import { useAuth } from "@/_core/hooks/useAuth";
-import { getLoginUrl } from "@/const";
 import {
   Bot, CheckCircle2, XCircle, Eye, EyeOff, Loader2, Shield, ArrowRight, RefreshCw, Info
 } from "lucide-react";
@@ -9,12 +7,10 @@ import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 
 export default function BotToken() {
-  const { isAuthenticated, loading: authLoading } = useAuth();
   const [token, setToken] = useState("");
   const [showToken, setShowToken] = useState(false);
 
   const { data: botSettings, isLoading, refetch } = trpc.bot.get.useQuery(undefined, {
-    enabled: isAuthenticated,
   });
 
   const validateMutation = trpc.bot.validate.useMutation({
@@ -29,19 +25,6 @@ export default function BotToken() {
     },
     onError: (err) => toast.error(err.message),
   });
-
-  if (authLoading) return <div className="flex h-full items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-primary" /></div>;
-
-  if (!isAuthenticated) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
-        <p className="text-muted-foreground">Please sign in to manage your bot token.</p>
-        <a href={getLoginUrl()} className="inline-flex items-center gap-2 rounded-xl gradient-primary px-5 py-2.5 text-sm font-semibold text-white">
-          Sign in <ArrowRight className="h-4 w-4" />
-        </a>
-      </div>
-    );
-  }
 
   const isValid = botSettings?.isValid;
   const hasToken = !!botSettings;

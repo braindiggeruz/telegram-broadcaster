@@ -1,7 +1,5 @@
 import { useState, useEffect, useRef } from "react";
 import { trpc } from "@/lib/trpc";
-import { useAuth } from "@/_core/hooks/useAuth";
-import { getLoginUrl } from "@/const";
 import { Link } from "wouter";
 import {
   Rocket, Settings, Play, Square, CheckCircle2, XCircle, Clock, Loader2,
@@ -13,7 +11,6 @@ import { cn } from "@/lib/utils";
 type ParseMode = "HTML" | "Markdown" | "MarkdownV2" | "None";
 
 export default function BroadcastLaunch() {
-  const { isAuthenticated, loading: authLoading } = useAuth();
 
   const [name, setName] = useState(`Broadcast ${new Date().toLocaleDateString()}`);
   const [message, setMessage] = useState(() => sessionStorage.getItem("composer_message") || "");
@@ -24,8 +21,8 @@ export default function BroadcastLaunch() {
   const [activeBroadcastId, setActiveBroadcastId] = useState<number | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const { data: botSettings } = trpc.bot.get.useQuery(undefined, { enabled: isAuthenticated });
-  const { data: lists } = trpc.recipients.list.useQuery(undefined, { enabled: isAuthenticated });
+  const { data: botSettings } = trpc.bot.get.useQuery(undefined, undefined);
+  const { data: lists } = trpc.recipients.list.useQuery(undefined, undefined);
 
   const { data: progress, refetch: refetchProgress } = trpc.broadcast.getProgress.useQuery(
     { id: activeBroadcastId! },
@@ -74,19 +71,6 @@ export default function BroadcastLaunch() {
   const remaining = Math.max(0, total - sent - failed);
   const progressPct = total > 0 ? Math.round(((sent + failed) / total) * 100) : 0;
   const successRate = (sent + failed) > 0 ? Math.round((sent / (sent + failed)) * 100) : 0;
-
-  if (authLoading) return <div className="flex h-full items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-primary" /></div>;
-
-  if (!isAuthenticated) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
-        <p className="text-muted-foreground">Please sign in to launch broadcasts.</p>
-        <a href={getLoginUrl()} className="inline-flex items-center gap-2 rounded-xl gradient-primary px-5 py-2.5 text-sm font-semibold text-white">
-          Sign in <ArrowRight className="h-4 w-4" />
-        </a>
-      </div>
-    );
-  }
 
   return (
     <div className="p-6 lg:p-8 max-w-3xl mx-auto space-y-6">
