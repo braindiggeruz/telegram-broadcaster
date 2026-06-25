@@ -4,34 +4,39 @@ import NotFound from "@/pages/NotFound";
 import { Route, Switch } from "wouter";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
-import Home from "./pages/Home";
+import AppLayout from "./components/AppLayout";
+import DashboardHome from "./pages/DashboardHome";
+import BotToken from "./pages/BotToken";
+import Recipients from "./pages/Recipients";
+import Composer from "./pages/Composer";
+import BroadcastLaunch from "./pages/BroadcastLaunch";
+import BroadcastHistory from "./pages/BroadcastHistory";
+import BroadcastReport from "./pages/BroadcastReport";
 
 function Router() {
-  // make sure to consider if you need authentication for certain routes
   return (
-    <Switch>
-      <Route path={"/"} component={Home} />
-      <Route path={"/404"} component={NotFound} />
-      {/* Final fallback route */}
-      <Route component={NotFound} />
-    </Switch>
+    <AppLayout>
+      <Switch>
+        <Route path="/" component={DashboardHome} />
+        <Route path="/bot-token" component={BotToken} />
+        <Route path="/recipients" component={Recipients} />
+        <Route path="/composer" component={Composer} />
+        <Route path="/launch" component={BroadcastLaunch} />
+        <Route path="/history" component={BroadcastHistory} />
+        <Route path="/history/:id" component={BroadcastReport} />
+        <Route path="/404" component={NotFound} />
+        <Route component={NotFound} />
+      </Switch>
+    </AppLayout>
   );
 }
-
-// NOTE: About Theme
-// - First choose a default theme according to your design style (dark or light bg), than change color palette in index.css
-//   to keep consistent foreground/background color across components
-// - If you want to make theme switchable, pass `switchable` ThemeProvider and use `useTheme` hook
 
 function App() {
   return (
     <ErrorBoundary>
-      <ThemeProvider
-        defaultTheme="light"
-        // switchable
-      >
+      <ThemeProvider defaultTheme="dark">
         <TooltipProvider>
-          <Toaster />
+          <Toaster theme="dark" position="top-right" richColors />
           <Router />
         </TooltipProvider>
       </ThemeProvider>
