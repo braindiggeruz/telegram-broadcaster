@@ -8,10 +8,17 @@ import {
   getRecipientLists, getRecipientList, createRecipientList, deleteRecipientList,
   getBroadcasts, getBroadcast, createBroadcast, updateBroadcastStatus, updateBroadcastProgress,
   createBroadcastLog, getBroadcastLogs,
+  getMtprotoSession, upsertMtprotoSession, deleteMtprotoSession,
+  getMtprotoBroadcasts, getMtprotoBroadcast, createMtprotoBroadcast,
+  updateMtprotoBroadcastStatus, updateMtprotoBroadcastProgress,
+  createMtprotoBroadcastLog, getMtprotoBroadcastLogs,
   getDashboardStats,
 } from "./db";
 import https from "https";
-import http from "http";
+import {
+  sendPhoneCode, signInWithCode, signInWithPassword,
+  getActiveClient, logoutSession, sendMessageToUser,
+} from "./mtproto";
 
 // ── Telegram API helper ────────────────────────────────────────────────────
 
@@ -41,6 +48,9 @@ async function telegramRequest(token: string, method: string, body?: Record<stri
 
 // In-memory broadcast progress store (per broadcastId)
 const broadcastProgress: Record<number, { sent: number; failed: number; total: number; status: string; running: boolean }> = {};
+
+// In-memory MTProto broadcast progress store
+const mtprotoProgress: Record<number, { sent: number; failed: number; total: number; status: string; running: boolean }> = {};
 
 // ── Routers ────────────────────────────────────────────────────────────────
 
@@ -281,6 +291,215 @@ const broadcastRouter = router({
     }),
 });
 
+// ── MTProto Router ────────────────────────────────────────────────────────
+
+const mtprotoRouter = router({
+  // Get current session status
+  getSession: protectedProcedure.query(async ({ ctx }) => {
+    return getMtprotoSession(ctx.user.id);
+  }),
+
+  // Step 1: Send SMS code to phone number
+  sendCode: protectedProcedure
+    .input(z.object({ phone: z.string().min(7) }))
+    .mutation(async ({ ctx, input }) => {
+      const { phoneCodeHash } = await sendPhoneCode(ctx.user.id, input.phone);
+      return { sent: true, phoneCodeHash };
+    }),
+
+  // Step 2a: Sign in with SMS code
+  signIn: protectedProcedure
+    .input(z.object({ code: z.string().min(4) }))
+    .mutation(async ({ ctx, input }) => {
+      const result = await signInWithCode(ctx.user.id, input.code);
+      await upsertMtprotoSession(ctx.user.id, {
+        phone: result.user.phone,
+        firstName: result.user.firstName,
+        lastName: result.user.lastName,
+        username: result.user.username,
+        telegramId: result.user.id,
+        sessionString: result.sessionString,
+        isActive: true,
+      });
+      return { success: true, user: result.user };
+    }),
+
+  // Step 2b: Sign in with 2FA password
+  signInPassword: protectedProcedure
+    .input(z.object({ password: z.string().min(1) }))
+    .mutation(async ({ ctx, input }) => {
+      const result = await signInWithPassword(ctx.user.id, input.password);
+      await upsertMtprotoSession(ctx.user.id, {
+        phone: result.user.phone,
+        firstName: result.user.firstName,
+        lastName: result.user.lastName,
+        username: result.user.username,
+        telegramId: result.user.id,
+        sessionString: result.sessionString,
+        isActive: true,
+      });
+      return { success: true, user: result.user };
+    }),
+
+  // Logout / disconnect session
+  logout: protectedProcedure.mutation(async ({ ctx }) => {
+    await logoutSession(ctx.user.id);
+    await deleteMtprotoSession(ctx.user.id);
+    return { success: true };
+  }),
+
+  // MTProto Broadcast: list
+  listBroadcasts: protectedProcedure.query(async ({ ctx }) => {
+    return getMtprotoBroadcasts(ctx.user.id);
+  }),
+
+  // MTProto Broadcast: get single
+  getBroadcast: protectedProcedure
+    .input(z.object({ id: z.number() }))
+    .query(async ({ ctx, input }) => {
+      return getMtprotoBroadcast(input.id, ctx.user.id);
+    }),
+
+  // MTProto Broadcast: get logs
+  getBroadcastLogs: protectedProcedure
+    .input(z.object({ id: z.number() }))
+    .query(async ({ ctx, input }) => {
+      const bc = await getMtprotoBroadcast(input.id, ctx.user.id);
+      if (!bc) throw new Error("Broadcast not found");
+      return getMtprotoBroadcastLogs(input.id);
+    }),
+
+  // MTProto Broadcast: get real-time progress
+  getProgress: protectedProcedure
+    .input(z.object({ id: z.number() }))
+    .query(async ({ ctx, input }) => {
+      const prog = mtprotoProgress[input.id];
+      if (prog) return prog;
+      const bc = await getMtprotoBroadcast(input.id, ctx.user.id);
+      if (!bc) return null;
+      return { sent: bc.sentCount, failed: bc.failedCount, total: bc.totalRecipients, status: bc.status, running: bc.status === "running" };
+    }),
+
+  // MTProto Broadcast: create
+  createBroadcast: protectedProcedure
+    .input(z.object({
+      name: z.string().min(1),
+      message: z.string().min(1),
+      parseMode: z.enum(["HTML", "Markdown", "MarkdownV2", "None"]),
+      delaySeconds: z.number().min(1).max(30),
+      isDryRun: z.boolean(),
+      recipientListId: z.number(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const list = await getRecipientList(input.recipientListId, ctx.user.id);
+      if (!list) throw new Error("Recipient list not found");
+
+      const session = await getMtprotoSession(ctx.user.id);
+      if (!session?.isActive) throw new Error("No active Telegram account connected. Please sign in first.");
+
+      const bc = await createMtprotoBroadcast({
+        userId: ctx.user.id,
+        name: input.name,
+        message: input.message,
+        parseMode: input.parseMode,
+        delaySeconds: input.delaySeconds,
+        isDryRun: input.isDryRun,
+        recipientListId: input.recipientListId,
+        totalRecipients: list.totalCount,
+      });
+      return bc;
+    }),
+
+  // MTProto Broadcast: launch
+  launchBroadcast: protectedProcedure
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ ctx, input }) => {
+      const bc = await getMtprotoBroadcast(input.id, ctx.user.id);
+      if (!bc) throw new Error("Broadcast not found");
+      if (bc.status === "running") throw new Error("Already running");
+
+      const session = await getMtprotoSession(ctx.user.id);
+      if (!session?.sessionString || !session.isActive) {
+        throw new Error("No active Telegram account session. Please connect your account first.");
+      }
+
+      const list = bc.recipientListId ? await getRecipientList(bc.recipientListId, ctx.user.id) : null;
+      if (!list) throw new Error("Recipient list not found");
+
+      const recipients: string[] = JSON.parse(list.chatIds);
+
+      mtprotoProgress[input.id] = { sent: 0, failed: 0, total: recipients.length, status: "running", running: true };
+      await updateMtprotoBroadcastStatus(input.id, "running", { startedAt: new Date() });
+
+      // Fire and forget
+      (async () => {
+        let sent = 0, failed = 0;
+        const delayMs = bc.delaySeconds * 1000;
+
+        if (bc.isDryRun) {
+          // Simulate without real sending
+          for (const recipient of recipients) {
+            if (mtprotoProgress[input.id]?.status === "cancelled") break;
+            await new Promise(r => setTimeout(r, Math.min(delayMs, 200)));
+            sent++;
+            mtprotoProgress[input.id] = { sent, failed, total: recipients.length, status: "running", running: true };
+          }
+        } else {
+          const client = await getActiveClient(ctx.user.id, session.sessionString!);
+          if (!client) throw new Error("Could not restore Telegram session");
+
+          for (const recipient of recipients) {
+            if (mtprotoProgress[input.id]?.status === "cancelled") break;
+
+            const result = await sendMessageToUser(client, recipient, bc.message, bc.parseMode);
+            if (result.success) {
+              sent++;
+              await createMtprotoBroadcastLog({ broadcastId: input.id, recipient, success: true });
+            } else {
+              failed++;
+              await createMtprotoBroadcastLog({ broadcastId: input.id, recipient, success: false, errorMessage: result.error });
+            }
+
+            mtprotoProgress[input.id] = { sent, failed, total: recipients.length, status: "running", running: true };
+            if ((sent + failed) % 10 === 0) {
+              await updateMtprotoBroadcastProgress(input.id, sent, failed);
+            }
+
+            await new Promise(r => setTimeout(r, delayMs));
+          }
+        }
+
+        const wasCancelled = mtprotoProgress[input.id]?.status === "cancelled";
+        const finalStatus = wasCancelled ? "cancelled" : "completed";
+        const successRate = recipients.length > 0 ? (sent / recipients.length) * 100 : 0;
+
+        mtprotoProgress[input.id] = { sent, failed, total: recipients.length, status: finalStatus, running: false };
+        await updateMtprotoBroadcastStatus(input.id, finalStatus, {
+          sentCount: sent, failedCount: failed,
+          successRate: Math.round(successRate * 10) / 10,
+          completedAt: new Date(),
+        });
+      })().catch(async (err) => {
+        mtprotoProgress[input.id] = { ...(mtprotoProgress[input.id] ?? { sent: 0, failed: 0, total: 0 }), status: "failed", running: false };
+        await updateMtprotoBroadcastStatus(input.id, "failed");
+        console.error("[MTProto Broadcast] Error:", err);
+      });
+
+      return { started: true };
+    }),
+
+  // MTProto Broadcast: cancel
+  cancelBroadcast: protectedProcedure
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ ctx, input }) => {
+      const bc = await getMtprotoBroadcast(input.id, ctx.user.id);
+      if (!bc) throw new Error("Broadcast not found");
+      if (mtprotoProgress[input.id]) mtprotoProgress[input.id].status = "cancelled";
+      await updateMtprotoBroadcastStatus(input.id, "cancelled");
+      return { cancelled: true };
+    }),
+});
+
 const statsRouter = router({
   dashboard: protectedProcedure.query(async ({ ctx }) => {
     return getDashboardStats(ctx.user.id);
@@ -300,6 +519,7 @@ export const appRouter = router({
   bot: botRouter,
   recipients: recipientsRouter,
   broadcast: broadcastRouter,
+  mtproto: mtprotoRouter,
   stats: statsRouter,
 });
 

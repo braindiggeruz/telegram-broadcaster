@@ -33,3 +33,15 @@
 - [x] Responsive layout verification
 - [x] Vitest tests for routers (7/7 passing)
 - [x] Final checkpoint
+
+## Phase 7: MTProto User Account Broadcasting
+- [ ] Install telegram (GramJS) npm package
+- [ ] Add mtproto_sessions table to drizzle schema
+- [ ] Add MTProto DB helpers (save/get/delete session)
+- [ ] Backend: mtproto router — sendCode, signIn, signInQR, checkSession, logout, getMe
+- [ ] Backend: mtproto broadcast router — create & launch via user account, progress, cancel
+- [ ] Frontend: MTProto Account page — phone input, SMS/QR auth flow, session status card
+- [ ] Frontend: MTProto Broadcast page — launch with user account, real-time progress
+- [ ] Add "User Account" section to sidebar navigation
+- [ ] Vitest tests for mtproto routers
+- [ ] Final checkpoint

@@ -88,3 +88,55 @@ export const broadcastLogs = mysqlTable("broadcast_logs", {
 });
 
 export type BroadcastLog = typeof broadcastLogs.$inferSelect;
+
+// MTProto user account sessions
+export const mtprotoSessions = mysqlTable("mtproto_sessions", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull().unique(),
+  phone: varchar("phone", { length: 32 }),
+  firstName: varchar("firstName", { length: 128 }),
+  lastName: varchar("lastName", { length: 128 }),
+  username: varchar("username", { length: 128 }),
+  telegramId: varchar("telegramId", { length: 32 }),
+  sessionString: text("sessionString"),       // GramJS StringSession
+  isActive: boolean("isActive").default(false).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export type MtprotoSession = typeof mtprotoSessions.$inferSelect;
+
+// MTProto broadcasts (sent via user account)
+export const mtprotoBroadcasts = mysqlTable("mtproto_broadcasts", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  name: varchar("name", { length: 256 }).notNull(),
+  message: text("message").notNull(),
+  parseMode: mysqlEnum("parseMode", ["HTML", "Markdown", "MarkdownV2", "None"]).default("HTML").notNull(),
+  delaySeconds: float("delaySeconds").default(3.0).notNull(),
+  isDryRun: boolean("isDryRun").default(false).notNull(),
+  recipientListId: int("recipientListId"),
+  totalRecipients: int("totalRecipients").default(0).notNull(),
+  sentCount: int("sentCount").default(0).notNull(),
+  failedCount: int("failedCount").default(0).notNull(),
+  successRate: float("successRate"),
+  status: mysqlEnum("status", ["pending", "running", "completed", "failed", "cancelled"]).default("pending").notNull(),
+  startedAt: timestamp("startedAt"),
+  completedAt: timestamp("completedAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export type MtprotoBroadcast = typeof mtprotoBroadcasts.$inferSelect;
+
+// Per-message logs for MTProto broadcasts
+export const mtprotoBroadcastLogs = mysqlTable("mtproto_broadcast_logs", {
+  id: bigint("id", { mode: "number" }).autoincrement().primaryKey(),
+  broadcastId: int("broadcastId").notNull(),
+  recipient: varchar("recipient", { length: 128 }).notNull(), // user_id or @username
+  success: boolean("success").notNull(),
+  errorMessage: text("errorMessage"),
+  sentAt: timestamp("sentAt").defaultNow().notNull(),
+});
+
+export type MtprotoBroadcastLog = typeof mtprotoBroadcastLogs.$inferSelect;

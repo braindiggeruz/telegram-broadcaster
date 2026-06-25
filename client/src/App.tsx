@@ -12,6 +12,8 @@ import Composer from "./pages/Composer";
 import BroadcastLaunch from "./pages/BroadcastLaunch";
 import BroadcastHistory from "./pages/BroadcastHistory";
 import BroadcastReport from "./pages/BroadcastReport";
+import UserAccount from "./pages/UserAccount";
+import UserBroadcast from "./pages/UserBroadcast";
 
 function Router() {
   return (
@@ -24,6 +26,8 @@ function Router() {
         <Route path="/launch" component={BroadcastLaunch} />
         <Route path="/history" component={BroadcastHistory} />
         <Route path="/history/:id" component={BroadcastReport} />
+        <Route path="/user-account" component={UserAccount} />
+        <Route path="/user-broadcast" component={UserBroadcast} />
         <Route path="/404" component={NotFound} />
         <Route component={NotFound} />
       </Switch>

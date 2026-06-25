@@ -1,6 +1,6 @@
-import { eq, desc, and, sql } from "drizzle-orm";
+import { eq, desc, and } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
-import { InsertUser, users, botSettings, recipientLists, broadcasts, broadcastLogs } from "../drizzle/schema";
+import { InsertUser, users, botSettings, recipientLists, broadcasts, broadcastLogs, mtprotoSessions, mtprotoBroadcasts, mtprotoBroadcastLogs } from "../drizzle/schema";
 import { ENV } from "./_core/env";
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -168,6 +168,99 @@ export async function getBroadcastLogs(broadcastId: number) {
     .where(eq(broadcastLogs.broadcastId, broadcastId))
     .orderBy(desc(broadcastLogs.sentAt))
     .limit(500);
+}
+
+// ── MTProto Sessions ──────────────────────────────────────────────────────
+
+export async function getMtprotoSession(userId: number) {
+  const db = await getDb();
+  if (!db) return null;
+  const result = await db.select().from(mtprotoSessions).where(eq(mtprotoSessions.userId, userId)).limit(1);
+  return result[0] ?? null;
+}
+
+export async function upsertMtprotoSession(userId: number, data: {
+  phone?: string; firstName?: string; lastName?: string;
+  username?: string; telegramId?: string; sessionString?: string; isActive: boolean;
+}) {
+  const db = await getDb();
+  if (!db) throw new Error("DB not available");
+  const existing = await getMtprotoSession(userId);
+  if (existing) {
+    await db.update(mtprotoSessions).set(data).where(eq(mtprotoSessions.userId, userId));
+  } else {
+    await db.insert(mtprotoSessions).values({ userId, ...data });
+  }
+  return getMtprotoSession(userId);
+}
+
+export async function deleteMtprotoSession(userId: number) {
+  const db = await getDb();
+  if (!db) return;
+  await db.delete(mtprotoSessions).where(eq(mtprotoSessions.userId, userId));
+}
+
+// ── MTProto Broadcasts ─────────────────────────────────────────────────────
+
+export async function getMtprotoBroadcasts(userId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(mtprotoBroadcasts).where(eq(mtprotoBroadcasts.userId, userId)).orderBy(desc(mtprotoBroadcasts.createdAt));
+}
+
+export async function getMtprotoBroadcast(id: number, userId: number) {
+  const db = await getDb();
+  if (!db) return null;
+  const result = await db.select().from(mtprotoBroadcasts)
+    .where(and(eq(mtprotoBroadcasts.id, id), eq(mtprotoBroadcasts.userId, userId))).limit(1);
+  return result[0] ?? null;
+}
+
+export async function createMtprotoBroadcast(data: {
+  userId: number; name: string; message: string;
+  parseMode: "HTML" | "Markdown" | "MarkdownV2" | "None";
+  delaySeconds: number; isDryRun: boolean;
+  recipientListId?: number; totalRecipients: number;
+}) {
+  const db = await getDb();
+  if (!db) throw new Error("DB not available");
+  await db.insert(mtprotoBroadcasts).values({ ...data, status: "pending" });
+  const result = await db.select().from(mtprotoBroadcasts)
+    .where(eq(mtprotoBroadcasts.userId, data.userId)).orderBy(desc(mtprotoBroadcasts.createdAt)).limit(1);
+  return result[0];
+}
+
+export async function updateMtprotoBroadcastStatus(
+  id: number,
+  status: "pending" | "running" | "completed" | "failed" | "cancelled",
+  extra?: { sentCount?: number; failedCount?: number; successRate?: number; startedAt?: Date; completedAt?: Date }
+) {
+  const db = await getDb();
+  if (!db) throw new Error("DB not available");
+  await db.update(mtprotoBroadcasts).set({ status, ...extra }).where(eq(mtprotoBroadcasts.id, id));
+}
+
+export async function updateMtprotoBroadcastProgress(id: number, sentCount: number, failedCount: number) {
+  const db = await getDb();
+  if (!db) throw new Error("DB not available");
+  await db.update(mtprotoBroadcasts).set({ sentCount, failedCount }).where(eq(mtprotoBroadcasts.id, id));
+}
+
+export async function createMtprotoBroadcastLog(data: {
+  broadcastId: number; recipient: string; success: boolean; errorMessage?: string;
+}) {
+  const db = await getDb();
+  if (!db) throw new Error("DB not available");
+  await db.insert(mtprotoBroadcastLogs).values(data);
+}
+
+export async function getMtprotoBroadcastLogs(broadcastId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(mtprotoBroadcastLogs)
+    .where(eq(mtprotoBroadcastLogs.broadcastId, broadcastId))
+    .orderBy(desc(mtprotoBroadcastLogs.sentAt))
+    .limit(1000);
 }
 
 // ── Stats ──────────────────────────────────────────────────────────────────

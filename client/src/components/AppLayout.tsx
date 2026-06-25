@@ -11,16 +11,23 @@ import {
   X,
   Send,
   ChevronRight,
+  UserCircle,
+  Radio,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-const navItems = [
+const botNavItems = [
   { href: "/", icon: LayoutDashboard, label: "Dashboard" },
   { href: "/bot-token", icon: Bot, label: "Bot Token" },
   { href: "/recipients", icon: Users, label: "Recipients" },
   { href: "/composer", icon: MessageSquare, label: "Message Composer" },
   { href: "/launch", icon: Rocket, label: "Broadcast Launch" },
   { href: "/history", icon: History, label: "Broadcast History" },
+];
+
+const userNavItems = [
+  { href: "/user-account", icon: UserCircle, label: "User Account" },
+  { href: "/user-broadcast", icon: Radio, label: "User Broadcast" },
 ];
 
 function SidebarContent({ onClose }: { onClose?: () => void }) {
@@ -50,18 +57,33 @@ function SidebarContent({ onClose }: { onClose?: () => void }) {
       {/* Nav */}
       <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-0.5">
         <p className="px-3 mb-2 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/60">
-          Navigation
+          Bot API
         </p>
-        {navItems.map(({ href, icon: Icon, label }) => {
+        {botNavItems.map(({ href, icon: Icon, label }) => {
           const isActive = href === "/" ? location === "/" : location.startsWith(href);
           return (
             <Link key={href} href={href} onClick={onClose}>
-              <div
-                className={cn(
-                  "nav-item group",
-                  isActive && "active"
-                )}
-              >
+              <div className={cn("nav-item group", isActive && "active")}>
+                <Icon className={cn("h-4 w-4 shrink-0", isActive ? "text-primary" : "text-muted-foreground group-hover:text-foreground")} />
+                <span className={cn("flex-1", isActive ? "text-primary" : "text-sidebar-foreground/80 group-hover:text-foreground")}>
+                  {label}
+                </span>
+                {isActive && <ChevronRight className="h-3 w-3 text-primary/60" />}
+              </div>
+            </Link>
+          );
+        })}
+
+        <div className="pt-4 pb-1">
+          <p className="px-3 mb-2 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/60">
+            User Account
+          </p>
+        </div>
+        {userNavItems.map(({ href, icon: Icon, label }) => {
+          const isActive = location.startsWith(href);
+          return (
+            <Link key={href} href={href} onClick={onClose}>
+              <div className={cn("nav-item group", isActive && "active")}>
                 <Icon className={cn("h-4 w-4 shrink-0", isActive ? "text-primary" : "text-muted-foreground group-hover:text-foreground")} />
                 <span className={cn("flex-1", isActive ? "text-primary" : "text-sidebar-foreground/80 group-hover:text-foreground")}>
                   {label}
