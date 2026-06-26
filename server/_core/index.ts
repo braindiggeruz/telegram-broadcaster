@@ -7,6 +7,7 @@ import { registerStorageProxy } from "./storageProxy";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
+import { reconcileStaleBroadcasts } from "../db";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -49,8 +50,15 @@ async function startServer() {
     serveStatic(app);
   }
 
+  // Recover any broadcasts that were interrupted by a previous restart/crash.
+  await reconcileStaleBroadcasts().catch((e) => console.warn("[startup] reconcile failed:", e));
+
   const preferredPort = parseInt(process.env.PORT || "3000");
-  const port = await findAvailablePort(preferredPort);
+  // In production bind the EXACT port Nginx proxies to — never silently shift,
+  // otherwise the reverse proxy returns 502 after a restart.
+  const port = process.env.NODE_ENV === "production"
+    ? preferredPort
+    : await findAvailablePort(preferredPort);
 
   if (port !== preferredPort) {
     console.log(`Port ${preferredPort} is busy, using port ${port} instead`);

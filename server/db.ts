@@ -279,6 +279,33 @@ export async function getMtprotoBroadcastLogs(broadcastId: number) {
     .limit(1000);
 }
 
+// ── Resume / reconciliation helpers ─────────────────────────────────────────
+
+export async function getSucceededChatIds(broadcastId: number): Promise<string[]> {
+  const db = await getDb();
+  if (!db) return [];
+  const rows = await db.select({ chatId: broadcastLogs.chatId }).from(broadcastLogs)
+    .where(and(eq(broadcastLogs.broadcastId, broadcastId), eq(broadcastLogs.success, true)));
+  return rows.map(r => r.chatId);
+}
+
+export async function getSucceededRecipients(broadcastId: number): Promise<string[]> {
+  const db = await getDb();
+  if (!db) return [];
+  const rows = await db.select({ recipient: mtprotoBroadcastLogs.recipient }).from(mtprotoBroadcastLogs)
+    .where(and(eq(mtprotoBroadcastLogs.broadcastId, broadcastId), eq(mtprotoBroadcastLogs.success, true)));
+  return rows.map(r => r.recipient);
+}
+
+// On startup, any broadcast left in "running" (process was killed mid-send) is
+// marked failed so it can be safely relaunched — resume then skips delivered ones.
+export async function reconcileStaleBroadcasts(): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(broadcasts).set({ status: "failed" }).where(eq(broadcasts.status, "running"));
+  await db.update(mtprotoBroadcasts).set({ status: "failed" }).where(eq(mtprotoBroadcasts.status, "running"));
+}
+
 // ── Stats ──────────────────────────────────────────────────────────────────
 
 export async function getDashboardStats(userId: number) {

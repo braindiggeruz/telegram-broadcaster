@@ -110,7 +110,7 @@ export default function UserBroadcast() {
       <div>
         <h1 className="text-2xl font-bold text-foreground">User Account Broadcast</h1>
         <p className="text-muted-foreground mt-1">
-          Рассылка от вашего личного Telegram-аккаунта по любым пользователям
+          Рассылка от вашего личного Telegram-аккаунта по списку номеров телефонов
         </p>
       </div>
 

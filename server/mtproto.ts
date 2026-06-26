@@ -5,6 +5,7 @@
 import { TelegramClient } from "telegram";
 import { StringSession } from "telegram/sessions/index.js";
 import { Api } from "telegram";
+import bigInt from "big-integer";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -39,8 +40,9 @@ export async function createClient(sessionString = ""): Promise<MtprotoClientInf
   const { apiId, apiHash } = getApiCredentials();
   const session = new StringSession(sessionString);
   const client = new TelegramClient(session, apiId, apiHash, {
-    connectionRetries: 3,
+    connectionRetries: 5,
     useWSS: false,
+    floodSleepThreshold: 120,
   });
   return { client, session };
 }
@@ -200,21 +202,109 @@ export interface SendResult {
   error?: string;
 }
 
+// Track contacts imported during a broadcast so we can clean them up afterwards.
+const importedContacts = new Map<TelegramClient, Api.User[]>();
+
+function normalizePhone(raw: string): string | null {
+  const digits = raw.replace(/[^\d]/g, "");
+  if (digits.length < 10 || digits.length > 15) return null;
+  return digits;
+}
+
+function looksLikePhone(raw: string): boolean {
+  const t = raw.trim();
+  if (t.startsWith("@")) return false;
+  return /^\+?[\d\s\-()]{10,20}$/.test(t) && normalizePhone(t) !== null;
+}
+
+// Resolve a phone number to a Telegram user via contacts.ImportContacts.
+// Returns null when the number has no Telegram account or hides itself via
+// privacy settings ("who can find me by phone number").
+async function resolvePhoneEntity(client: TelegramClient, phone: string): Promise<Api.User | null> {
+  const normalized = normalizePhone(phone);
+  if (!normalized) return null;
+
+  const res = (await client.invoke(
+    new Api.contacts.ImportContacts({
+      contacts: [
+        new Api.InputPhoneContact({
+          clientId: bigInt(Date.now() + Math.floor(Math.random() * 1e6)),
+          phone: normalized,
+          firstName: "Student",
+          lastName: "",
+        }),
+      ],
+    })
+  )) as Api.contacts.ImportedContacts;
+
+  const user = res.users?.find((u): u is Api.User => u instanceof Api.User) ?? null;
+  if (user) {
+    const list = importedContacts.get(client) ?? [];
+    list.push(user);
+    importedContacts.set(client, list);
+  }
+  return user;
+}
+
 export async function sendMessageToUser(
   client: TelegramClient,
   recipient: string,
   message: string,
   parseMode: "HTML" | "Markdown" | "MarkdownV2" | "None"
 ): Promise<SendResult> {
-  try {
-    const formattingMode = parseMode === "None" ? undefined : parseMode.toLowerCase() as "html" | "markdown";
-    await client.sendMessage(recipient, {
-      message,
-      parseMode: formattingMode,
-    });
+  const formattingMode =
+    parseMode === "None" ? undefined : parseMode === "HTML" ? "html" : "markdown";
+
+  const send = async (): Promise<SendResult> => {
+    let target: string | Api.User = recipient.trim();
+
+    if (looksLikePhone(recipient)) {
+      const entity = await resolvePhoneEntity(client, recipient);
+      if (!entity) {
+        return {
+          recipient,
+          success: false,
+          error: "Номер не найден в Telegram или скрыт настройками приватности",
+        };
+      }
+      target = entity;
+    }
+
+    await client.sendMessage(target, { message, parseMode: formattingMode as "html" | "markdown" | undefined });
     return { recipient, success: true };
+  };
+
+  try {
+    return await send();
   } catch (err: unknown) {
-    const e = err as { message?: string };
-    return { recipient, success: false, error: e?.message ?? String(err) };
+    const e = err as { seconds?: number; errorMessage?: string; message?: string };
+    const msg = e?.errorMessage ?? e?.message ?? String(err);
+    // FLOOD_WAIT_X: wait the requested time and retry once.
+    if (typeof e?.seconds === "number" && e.seconds > 0 && e.seconds <= 300) {
+      await new Promise((r) => setTimeout(r, (e.seconds! + 1) * 1000));
+      try {
+        return await send();
+      } catch (err2: unknown) {
+        const e2 = err2 as { errorMessage?: string; message?: string };
+        return { recipient, success: false, error: e2?.errorMessage ?? e2?.message ?? String(err2) };
+      }
+    }
+    return { recipient, success: false, error: msg };
   }
+}
+
+// Remove the contacts that were imported during a broadcast so the sender's
+// address book is not polluted with thousands of students.
+export async function cleanupImportedContacts(client: TelegramClient): Promise<void> {
+  const list = importedContacts.get(client);
+  if (!list || list.length === 0) return;
+  try {
+    const ids = list.map(
+      (u) => new Api.InputUser({ userId: u.id, accessHash: u.accessHash ?? bigInt(0) })
+    );
+    await client.invoke(new Api.contacts.DeleteContacts({ id: ids }));
+  } catch {
+    /* best-effort cleanup */
+  }
+  importedContacts.delete(client);
 }

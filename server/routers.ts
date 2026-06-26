@@ -10,17 +10,18 @@ import {
   getMtprotoBroadcasts, getMtprotoBroadcast, createMtprotoBroadcast,
   updateMtprotoBroadcastStatus, updateMtprotoBroadcastProgress,
   createMtprotoBroadcastLog, getMtprotoBroadcastLogs,
+  getSucceededChatIds, getSucceededRecipients,
   getDashboardStats,
 } from "./db";
 import https from "https";
 import {
   sendPhoneCode, signInWithCode, signInWithPassword,
-  getActiveClient, logoutSession, sendMessageToUser,
+  getActiveClient, logoutSession, sendMessageToUser, cleanupImportedContacts,
 } from "./mtproto";
 
 // ── Telegram API helper ────────────────────────────────────────────────────
 
-async function telegramRequest(token: string, method: string, body?: Record<string, unknown>): Promise<{ ok: boolean; result?: unknown; description?: string }> {
+async function telegramRequest(token: string, method: string, body?: Record<string, unknown>): Promise<{ ok: boolean; result?: unknown; description?: string; parameters?: { retry_after?: number } }> {
   return new Promise((resolve) => {
     const data = body ? JSON.stringify(body) : undefined;
     const options = {
@@ -42,6 +43,21 @@ async function telegramRequest(token: string, method: string, body?: Record<stri
     if (data) req.write(data);
     req.end();
   });
+}
+
+// Normalize a raw recipient entry. Accepts:
+//   • phone numbers (+998901234567, 998 90 123 45 67) → kept with leading "+"
+//   • numeric chat IDs (123456789, -100123…) → kept as-is
+//   • @usernames → kept as-is
+function normalizeRecipient(raw: string): string | null {
+  const v = String(raw).trim();
+  if (!v) return null;
+  if (v.startsWith("@")) return v.length > 1 ? v : null;
+  if (/^-?\d+$/.test(v)) return v; // numeric chat id (incl. negative for groups)
+  const hasPlus = v.startsWith("+");
+  const digits = v.replace(/[^\d]/g, "");
+  if (digits.length >= 10 && digits.length <= 15) return hasPlus ? "+" + digits : "+" + digits;
+  return null;
 }
 
 // In-memory broadcast progress store (per broadcastId)
@@ -95,33 +111,39 @@ const recipientsRouter = router({
       fileType: z.enum(["json", "csv"]),
     }))
     .mutation(async ({ ctx, input }) => {
-      let chatIds: string[] = [];
+      let raw: string[] = [];
 
       if (input.fileType === "json") {
         try {
           const parsed = JSON.parse(input.content);
           if (Array.isArray(parsed)) {
-            chatIds = parsed.map(String);
+            raw = parsed.map(String);
           } else if (parsed.users && Array.isArray(parsed.users)) {
-            chatIds = parsed.users.map(String);
+            raw = parsed.users.map(String);
           } else if (parsed.chat_ids && Array.isArray(parsed.chat_ids)) {
-            chatIds = parsed.chat_ids.map(String);
+            raw = parsed.chat_ids.map(String);
+          } else if (parsed.phones && Array.isArray(parsed.phones)) {
+            raw = parsed.phones.map(String);
           } else {
-            throw new Error("JSON must be an array or object with 'users'/'chat_ids' key");
+            throw new Error("JSON must be an array or object with 'users'/'chat_ids'/'phones' key");
           }
         } catch (e: unknown) {
           throw new Error(`Invalid JSON: ${e instanceof Error ? e.message : String(e)}`);
         }
       } else {
-        // CSV: one ID per line, skip header if non-numeric
+        // CSV / TXT: one recipient per line (first column), header auto-skipped by normalizer
         const lines = input.content.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
         for (const line of lines) {
-          const val = line.split(",")[0].trim();
-          if (/^-?\d+$/.test(val)) chatIds.push(val);
+          raw.push(line.split(",")[0].trim());
         }
       }
 
-      if (chatIds.length === 0) throw new Error("No valid chat IDs found in file");
+      // Normalize: accept phone numbers (+998…), numeric chat IDs and @usernames
+      let chatIds = raw
+        .map(normalizeRecipient)
+        .filter((v): v is string => v !== null);
+
+      if (chatIds.length === 0) throw new Error("No valid phone numbers / chat IDs found in file");
 
       // Deduplicate
       chatIds = Array.from(new Set(chatIds));
@@ -216,17 +238,21 @@ const broadcastRouter = router({
 
       const chatIds: string[] = JSON.parse(list.chatIds);
 
+      // Resume support: skip recipients already delivered successfully.
+      const alreadyDone = bc.isDryRun ? new Set<string>() : new Set(await getSucceededChatIds(input.id));
+
       // Init progress
-      broadcastProgress[input.id] = { sent: 0, failed: 0, total: chatIds.length, status: "running", running: true };
+      broadcastProgress[input.id] = { sent: alreadyDone.size, failed: 0, total: chatIds.length, status: "running", running: true };
       await updateBroadcastStatus(input.id, "running", { startedAt: new Date() });
 
       // Run async (fire and forget)
       (async () => {
-        let sent = 0, failed = 0;
+        let sent = alreadyDone.size, failed = 0;
         const delayMs = bc.delaySeconds * 1000;
 
         for (const chatId of chatIds) {
           if (broadcastProgress[input.id]?.status === "cancelled") break;
+          if (alreadyDone.has(chatId)) continue;
 
           if (bc.isDryRun) {
             // Simulate delay
@@ -239,7 +265,16 @@ const broadcastRouter = router({
             };
             if (bc.parseMode !== "None") payload.parse_mode = bc.parseMode;
 
-            const res = await telegramRequest(botCfg.botToken, "sendMessage", payload);
+            let res = await telegramRequest(botCfg.botToken, "sendMessage", payload);
+            // Honour Telegram rate limits (429 Too Many Requests + retry_after)
+            let rateRetries = 0;
+            let retryAfter = res.parameters?.retry_after;
+            while (!res.ok && retryAfter && rateRetries < 5) {
+              await new Promise(r => setTimeout(r, (retryAfter! + 1) * 1000));
+              res = await telegramRequest(botCfg.botToken, "sendMessage", payload);
+              retryAfter = res.parameters?.retry_after;
+              rateRetries++;
+            }
             if (res.ok) {
               sent++;
               await createBroadcastLog({ broadcastId: input.id, chatId, success: true });
@@ -426,12 +461,15 @@ const mtprotoRouter = router({
 
       const recipients: string[] = JSON.parse(list.chatIds);
 
-      mtprotoProgress[input.id] = { sent: 0, failed: 0, total: recipients.length, status: "running", running: true };
+      // Resume support: skip recipients already delivered successfully.
+      const alreadyDone = bc.isDryRun ? new Set<string>() : new Set(await getSucceededRecipients(input.id));
+
+      mtprotoProgress[input.id] = { sent: alreadyDone.size, failed: 0, total: recipients.length, status: "running", running: true };
       await updateMtprotoBroadcastStatus(input.id, "running", { startedAt: new Date() });
 
       // Fire and forget
       (async () => {
-        let sent = 0, failed = 0;
+        let sent = alreadyDone.size, failed = 0;
         const delayMs = bc.delaySeconds * 1000;
 
         if (bc.isDryRun) {
@@ -448,6 +486,7 @@ const mtprotoRouter = router({
 
           for (const recipient of recipients) {
             if (mtprotoProgress[input.id]?.status === "cancelled") break;
+            if (alreadyDone.has(recipient)) continue;
 
             const result = await sendMessageToUser(client, recipient, bc.message, bc.parseMode);
             if (result.success) {
@@ -465,6 +504,9 @@ const mtprotoRouter = router({
 
             await new Promise(r => setTimeout(r, delayMs));
           }
+
+          // Remove the contacts imported during this broadcast.
+          await cleanupImportedContacts(client);
         }
 
         const wasCancelled = mtprotoProgress[input.id]?.status === "cancelled";

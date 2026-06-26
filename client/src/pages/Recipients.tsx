@@ -7,6 +7,17 @@ import {
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 
+// Accepts phone numbers (+998…), numeric chat IDs and @usernames.
+function normalizeRecipient(raw: string): string | null {
+  const v = String(raw).trim();
+  if (!v) return null;
+  if (v.startsWith("@")) return v.length > 1 ? v : null;
+  if (/^-?\d+$/.test(v)) return v;
+  const digits = v.replace(/[^\d]/g, "");
+  if (digits.length >= 10 && digits.length <= 15) return "+" + digits;
+  return null;
+}
+
 function FileUploadZone({ onFile }: { onFile: (name: string, content: string, type: "json" | "csv") => void }) {
   const [dragging, setDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -62,7 +73,7 @@ function FileUploadZone({ onFile }: { onFile: (name: string, content: string, ty
         <p className="text-sm font-semibold text-foreground">
           {dragging ? "Drop file here" : "Drag & drop or click to upload"}
         </p>
-        <p className="text-xs text-muted-foreground mt-1">Supports JSON and CSV files with chat IDs</p>
+        <p className="text-xs text-muted-foreground mt-1">Supports JSON / CSV with phone numbers (+998…), chat IDs or @usernames</p>
       </div>
       <div className="flex items-center gap-3 mt-1">
         <div className="flex items-center gap-1.5 rounded-lg bg-muted px-3 py-1.5">
@@ -106,19 +117,18 @@ export default function Recipients() {
     setPreview({ name, content, type });
     // Parse preview
     try {
-      let ids: string[] = [];
+      let raw: string[] = [];
       if (type === "json") {
         const parsed = JSON.parse(content);
-        if (Array.isArray(parsed)) ids = parsed.map(String);
-        else if (parsed.users) ids = parsed.users.map(String);
-        else if (parsed.chat_ids) ids = parsed.chat_ids.map(String);
+        if (Array.isArray(parsed)) raw = parsed.map(String);
+        else if (parsed.users) raw = parsed.users.map(String);
+        else if (parsed.chat_ids) raw = parsed.chat_ids.map(String);
+        else if (parsed.phones) raw = parsed.phones.map(String);
       } else {
         const lines = content.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-        for (const line of lines) {
-          const val = line.split(",")[0].trim();
-          if (/^-?\d+$/.test(val)) ids.push(val);
-        }
+        for (const line of lines) raw.push(line.split(",")[0].trim());
       }
+      const ids = raw.map(normalizeRecipient).filter((v): v is string => v !== null);
       setParsedIds(Array.from(new Set(ids)));
     } catch {
       setParsedIds([]);
@@ -153,7 +163,7 @@ export default function Recipients() {
                 <div className="flex items-center gap-3 mt-0.5">
                   <span className="flex items-center gap-1 text-xs text-muted-foreground">
                     <Hash className="h-3 w-3" />
-                    {parsedIds.length.toLocaleString()} unique chat IDs
+                    {parsedIds.length.toLocaleString()} unique recipients
                   </span>
                   {parsedIds.length > 0 && (
                     <span className="badge-success"><CheckCircle2 className="h-3 w-3" />Ready</span>
@@ -302,15 +312,15 @@ export default function Recipients() {
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <p className="text-xs font-medium text-muted-foreground mb-1.5 flex items-center gap-1.5"><FileJson className="h-3.5 w-3.5 text-primary" />JSON</p>
-            <pre className="rounded-lg bg-muted px-3 py-2 text-xs font-mono text-muted-foreground overflow-x-auto">{`[123456789, 987654321]
+            <pre className="rounded-lg bg-muted px-3 py-2 text-xs font-mono text-muted-foreground overflow-x-auto">{`["+998901234567", "+998901112233"]
 // or
-{"chat_ids": [123, 456]}`}</pre>
+{"phones": ["+998901234567"]}`}</pre>
           </div>
           <div>
             <p className="text-xs font-medium text-muted-foreground mb-1.5 flex items-center gap-1.5"><FileText className="h-3.5 w-3.5 text-primary" />CSV</p>
-            <pre className="rounded-lg bg-muted px-3 py-2 text-xs font-mono text-muted-foreground overflow-x-auto">{`chat_id
-123456789
-987654321`}</pre>
+            <pre className="rounded-lg bg-muted px-3 py-2 text-xs font-mono text-muted-foreground overflow-x-auto">{`phone
++998901234567
++998901112233`}</pre>
           </div>
         </div>
       </div>

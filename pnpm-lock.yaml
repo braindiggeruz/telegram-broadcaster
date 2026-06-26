@@ -121,6 +121,9 @@ importers:
       axios:
         specifier: ^1.12.0
         version: 1.12.2
+      big-integer:
+        specifier: 1.6.52
+        version: 1.6.52
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1
