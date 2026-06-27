@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import * as XLSX from "xlsx";
 
 // Accepts phone numbers (+998…), numeric chat IDs and @usernames.
 function normalizeRecipient(raw: string): string | null {
@@ -18,22 +19,66 @@ function normalizeRecipient(raw: string): string | null {
   return null;
 }
 
+// Strict phone matcher for spreadsheet cells: only real phone numbers (11-15 digits)
+// or @usernames. Rejects short numeric cells like company names ("7").
+function phoneCellFromExcel(raw: unknown): string | null {
+  const v = String(raw ?? "").trim();
+  if (!v) return null;
+  if (v.startsWith("@")) return v.length > 1 ? v : null;
+  const digits = v.replace(/[^\d]/g, "");
+  if (digits.length >= 11 && digits.length <= 15) return "+" + digits;
+  return null;
+}
+
 function FileUploadZone({ onFile }: { onFile: (name: string, content: string, type: "json" | "csv") => void }) {
   const [dragging, setDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const handleFile = useCallback((file: File) => {
     const ext = file.name.split(".").pop()?.toLowerCase();
-    if (ext !== "json" && ext !== "csv") {
-      toast.error("Only JSON and CSV files are supported");
+    if (ext !== "json" && ext !== "csv" && ext !== "xlsx" && ext !== "xls") {
+      toast.error("Поддерживаются файлы JSON, CSV и Excel (.xlsx/.xls)");
       return;
     }
     const reader = new FileReader();
-    reader.onload = (e) => {
-      const content = e.target?.result as string;
-      onFile(file.name, content, ext as "json" | "csv");
-    };
-    reader.readAsText(file);
+    if (ext === "xlsx" || ext === "xls") {
+      // Excel: read all sheets and pick any cell that looks like a phone/@username/ID,
+      // regardless of column position or stray values in the file.
+      reader.onload = (e) => {
+        try {
+          const data = new Uint8Array(e.target?.result as ArrayBuffer);
+          const wb = XLSX.read(data, { type: "array" });
+          const found: string[] = [];
+          for (const sheetName of wb.SheetNames) {
+            const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {
+              header: 1, raw: false, defval: "",
+            }) as unknown[][];
+            for (const row of rows) {
+              for (const cell of row) {
+                const norm = phoneCellFromExcel(cell);
+                if (norm) found.push(norm);
+              }
+            }
+          }
+          const content = Array.from(new Set(found)).join("\n");
+          if (!content) {
+            toast.error("В Excel-файле не найдено номеров телефонов");
+            return;
+          }
+          // Hand off as plain CSV content (one recipient per line).
+          onFile(file.name, content, "csv");
+        } catch {
+          toast.error("Не удалось прочитать Excel-файл");
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    } else {
+      reader.onload = (e) => {
+        const content = e.target?.result as string;
+        onFile(file.name, content, ext as "json" | "csv");
+      };
+      reader.readAsText(file);
+    }
   }, [onFile]);
 
   const onDrop = useCallback((e: React.DragEvent) => {
@@ -59,7 +104,7 @@ function FileUploadZone({ onFile }: { onFile: (name: string, content: string, ty
       <input
         ref={inputRef}
         type="file"
-        accept=".json,.csv"
+        accept=".json,.csv,.xlsx,.xls"
         className="hidden"
         onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); }}
       />
@@ -73,9 +118,13 @@ function FileUploadZone({ onFile }: { onFile: (name: string, content: string, ty
         <p className="text-sm font-semibold text-foreground">
           {dragging ? "Drop file here" : "Drag & drop or click to upload"}
         </p>
-        <p className="text-xs text-muted-foreground mt-1">Supports JSON / CSV with phone numbers (+998…), chat IDs or @usernames</p>
+        <p className="text-xs text-muted-foreground mt-1">Excel (.xlsx), CSV или JSON — номера (+998…), chat ID или @username. Номер находится автоматически в любой колонке.</p>
       </div>
       <div className="flex items-center gap-3 mt-1">
+        <div className="flex items-center gap-1.5 rounded-lg bg-muted px-3 py-1.5">
+          <FileText className="h-3.5 w-3.5 text-primary" />
+          <span className="text-xs font-medium text-muted-foreground">.xlsx</span>
+        </div>
         <div className="flex items-center gap-1.5 rounded-lg bg-muted px-3 py-1.5">
           <FileJson className="h-3.5 w-3.5 text-primary" />
           <span className="text-xs font-medium text-muted-foreground">.json</span>
