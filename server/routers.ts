@@ -484,6 +484,11 @@ const mtprotoRouter = router({
           const client = await getActiveClient(ctx.user.id, session.sessionString!);
           if (!client) throw new Error("Could not restore Telegram session");
 
+          // Anti-ban pacing config
+          let processed = 0;
+          let aborted = false;
+          let abortReason = "";
+
           for (const recipient of recipients) {
             if (mtprotoProgress[input.id]?.status === "cancelled") break;
             if (alreadyDone.has(recipient)) continue;
@@ -502,11 +507,37 @@ const mtprotoRouter = router({
               await updateMtprotoBroadcastProgress(input.id, sent, failed);
             }
 
-            await new Promise(r => setTimeout(r, delayMs));
+            // Account-level limit (PEER_FLOOD / long FLOOD_WAIT / banned session):
+            // stop the whole broadcast immediately so we don't extend the ban.
+            // Undelivered recipients are kept and can be resumed later (after warm-up).
+            if (result.fatal) {
+              aborted = true;
+              abortReason = result.error ?? "account limit";
+              break;
+            }
+
+            processed++;
+            // Randomized (jittered) delay — fixed intervals look automated to Telegram.
+            const jittered = Math.round(delayMs * (0.85 + Math.random() * 0.6));
+            await new Promise(r => setTimeout(r, jittered));
+            // Longer cooldown every 20 sends to reduce sustained-rate spam flags.
+            if (processed % 20 === 0) {
+              await new Promise(r => setTimeout(r, 30000 + Math.floor(Math.random() * 30000)));
+            }
           }
 
           // Remove the contacts imported during this broadcast.
           await cleanupImportedContacts(client);
+
+          if (aborted) {
+            const rate = recipients.length > 0 ? Math.round((sent / recipients.length) * 1000) / 10 : 0;
+            mtprotoProgress[input.id] = { sent, failed, total: recipients.length, status: "failed", running: false };
+            await updateMtprotoBroadcastStatus(input.id, "failed", {
+              sentCount: sent, failedCount: failed, successRate: rate, completedAt: new Date(),
+            });
+            console.warn(`[MTProto Broadcast ${input.id}] Stopped early to protect account: ${abortReason}`);
+            return;
+          }
         }
 
         const wasCancelled = mtprotoProgress[input.id]?.status === "cancelled";

@@ -200,6 +200,14 @@ export interface SendResult {
   recipient: string;
   success: boolean;
   error?: string;
+  // Account-level limit (PEER_FLOOD, long FLOOD_WAIT, banned/frozen session).
+  // When true the caller MUST stop the whole broadcast to avoid extending the ban.
+  fatal?: boolean;
+}
+
+// Errors that mean the SENDER account itself is restricted — not just one recipient.
+function isAccountLevelError(msg: string): boolean {
+  return /PEER_FLOOD|FLOOD_WAIT|USER_DEACTIVATED|USER_RESTRICTED|FROZEN|AUTH_KEY|SESSION_REVOKED|USER_BANNED|PHONE_NUMBER_BANNED|INPUT_USER_DEACTIVATED_ALL/i.test(msg);
 }
 
 // Track contacts imported during a broadcast so we can clean them up afterwards.
@@ -279,17 +287,21 @@ export async function sendMessageToUser(
   } catch (err: unknown) {
     const e = err as { seconds?: number; errorMessage?: string; message?: string };
     const msg = e?.errorMessage ?? e?.message ?? String(err);
-    // FLOOD_WAIT_X: wait the requested time and retry once.
-    if (typeof e?.seconds === "number" && e.seconds > 0 && e.seconds <= 300) {
-      await new Promise((r) => setTimeout(r, (e.seconds! + 1) * 1000));
-      try {
-        return await send();
-      } catch (err2: unknown) {
-        const e2 = err2 as { errorMessage?: string; message?: string };
-        return { recipient, success: false, error: e2?.errorMessage ?? e2?.message ?? String(err2) };
+    // FLOOD_WAIT_X: short waits → sleep & retry once. Long waits → fatal (stop broadcast).
+    if (typeof e?.seconds === "number" && e.seconds > 0) {
+      if (e.seconds <= 120) {
+        await new Promise((r) => setTimeout(r, (e.seconds! + 1) * 1000));
+        try {
+          return await send();
+        } catch (err2: unknown) {
+          const e2 = err2 as { errorMessage?: string; message?: string };
+          const m2 = e2?.errorMessage ?? e2?.message ?? String(err2);
+          return { recipient, success: false, error: m2, fatal: isAccountLevelError(m2) };
+        }
       }
+      return { recipient, success: false, error: `FLOOD_WAIT ${e.seconds}s — слишком долгая пауза, рассылка остановлена`, fatal: true };
     }
-    return { recipient, success: false, error: msg };
+    return { recipient, success: false, error: msg, fatal: isAccountLevelError(msg) };
   }
 }
 
