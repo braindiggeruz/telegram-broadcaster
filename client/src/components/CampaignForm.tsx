@@ -5,6 +5,10 @@ import { useServerDraft, type ParseMode } from "@/hooks/useServerDraft";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import MessagePreview from "@/components/MessagePreview";
+import PhotoAttachmentPicker, {
+  type PreviewPhoto,
+} from "@/components/PhotoAttachmentPicker";
+import { PHOTO_CAPTION_MAX_LENGTH } from "@shared/media";
 import StatusBadge, { terminalStatuses } from "@/components/StatusBadge";
 import { Loader2, Play, Square, ArrowRight, FlaskConical } from "lucide-react";
 import { toast } from "sonner";
@@ -38,6 +42,8 @@ export default function CampaignForm({
     initialId(transport)
   );
   const [launching, setLaunching] = useState(false);
+  const [photoBlocked, setPhotoBlocked] = useState(false);
+  const [pendingPhoto, setPendingPhoto] = useState<PreviewPhoto | null>(null);
   const pendingKey = useRef<{ fingerprint: string; key: string } | null>(null);
   const lists = trpc.recipients.list.useQuery();
   const bot = trpc.bot.get.useQuery(undefined, {
@@ -79,6 +85,9 @@ export default function CampaignForm({
         dryRun?: number;
       })
     | undefined;
+  const hasPhoto =
+    transport === "mtproto" && (!!draft.photoId || !!pendingPhoto);
+  const messageLimit = hasPhoto ? PHOTO_CAPTION_MAX_LENGTH : 4096;
   function remember(id: number | null) {
     setActiveId(id);
     try {
@@ -88,6 +97,7 @@ export default function CampaignForm({
     navigate(id ? `${rootPath}?campaign=${id}` : rootPath, { replace: true });
   }
   async function launch() {
+    if (photoBlocked) return;
     setLaunching(true);
     try {
       const saved = await draft.saveNow();
@@ -99,6 +109,7 @@ export default function CampaignForm({
         isDryRun: dryRun,
         recipientListId: Number(listId),
         approved: dryRun || approved,
+        ...(transport === "mtproto" ? { photoId: saved.photoId } : {}),
       };
       const fingerprint = JSON.stringify(payload);
       let request = pendingKey.current;
@@ -323,13 +334,13 @@ export default function CampaignForm({
                     htmlFor={`campaign-message-${transport}`}
                     className="text-sm font-medium"
                   >
-                    Сообщение
+                    {hasPhoto ? "Подпись к картинке" : "Сообщение"}
                   </label>
                   <select
                     className="bg-background rounded border border-border text-xs p-2"
                     aria-label="Формат сообщения"
                     value={draft.parseMode}
-                    disabled={!draft.ready}
+                    disabled={!draft.ready || launching}
                     onChange={e => {
                       draft.setParseMode(e.target.value as ParseMode);
                       setApproved(false);
@@ -344,12 +355,29 @@ export default function CampaignForm({
                   id={`campaign-message-${transport}`}
                   className="w-full min-h-56 rounded-lg border border-border bg-background p-3 text-sm resize-y"
                   value={draft.message}
-                  disabled={!draft.ready}
+                  disabled={!draft.ready || launching}
+                  aria-describedby={`campaign-message-limit-${transport}`}
                   onChange={e => {
                     draft.setMessage(e.target.value);
                     setApproved(false);
                   }}
                 />
+                <p
+                  id={`campaign-message-limit-${transport}`}
+                  className={`text-xs ${draft.message.length > messageLimit ? "text-red-400" : "text-muted-foreground"}`}
+                  role={
+                    draft.message.length > messageLimit ? "alert" : undefined
+                  }
+                >
+                  {draft.message.length} / {messageLimit} символов
+                  {hasPhoto
+                    ? " · подпись необязательна, разметка тоже учитывается"
+                    : ""}
+                  {draft.message.length > messageLimit &&
+                    (hasPhoto
+                      ? ". Сократите подпись до 1 024 символов или уберите картинку."
+                      : ". Сократите сообщение до 4 096 символов.")}
+                </p>
                 <p className="text-xs text-muted-foreground">
                   {draft.saving || draft.dirty
                     ? "Сохраняем черновик…"
@@ -375,7 +403,7 @@ export default function CampaignForm({
                       onClick={() => {
                         if (
                           confirm(
-                            "Загрузить серверную версию вместо локального текста?"
+                            "Загрузить серверную версию вместо локального черновика?"
                           )
                         )
                           void draft.reloadServer();
@@ -386,6 +414,19 @@ export default function CampaignForm({
                   </div>
                 )}
               </div>
+              {transport === "mtproto" && (
+                <PhotoAttachmentPicker
+                  photo={draft.photo}
+                  disabled={!draft.ready || launching}
+                  onChange={photo => {
+                    draft.setPhoto(photo);
+                    setApproved(false);
+                  }}
+                  onSelectionStart={() => setApproved(false)}
+                  onBlockedChange={setPhotoBlocked}
+                  onPreviewChange={setPendingPhoto}
+                />
+              )}
               <details className="text-sm">
                 <summary className="cursor-pointer text-muted-foreground">
                   Параметры отправки
@@ -411,6 +452,9 @@ export default function CampaignForm({
               <MessagePreview
                 message={draft.message}
                 parseMode={draft.parseMode}
+                photo={
+                  transport === "mtproto" ? (pendingPhoto ?? draft.photo) : null
+                }
               />
               <div className="border-t border-border pt-4 space-y-3 text-sm">
                 <p>
@@ -466,8 +510,8 @@ export default function CampaignForm({
                     onChange={e => setApproved(e.target.checked)}
                   />
                   <span>
-                    Подтверждаю этот текст, выбранную аудиторию и реальную
-                    отправку.
+                    Подтверждаю {hasPhoto ? "картинку, подпись" : "этот текст"},
+                    выбранную аудиторию и реальную отправку.
                   </span>
                 </label>
               )}
@@ -477,10 +521,12 @@ export default function CampaignForm({
                   launching ||
                   !draft.ready ||
                   !!draft.error ||
+                  photoBlocked ||
                   !name.trim() ||
                   !listId ||
-                  !draft.message.trim() ||
-                  draft.message.length > 4096 ||
+                  (!draft.message.trim() &&
+                    !(transport === "mtproto" && draft.photoId)) ||
+                  draft.message.length > messageLimit ||
                   !Number.isFinite(delay) ||
                   delay < (transport === "bot" ? 1 : 3) ||
                   (!dryRun && (!approved || !connected))

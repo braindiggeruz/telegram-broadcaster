@@ -11,6 +11,7 @@ import type { SenderKind } from "./delivery";
 import { normalizeRecipient, parseRecipientCsv } from "../shared/recipients";
 import { createCampaign, launchCampaign, enrichedCampaign } from "./campaigns";
 import { draftRouter } from "./drafts";
+import { mediaRouter } from "./media";
 import { automationRouter } from "./automation";
 import { operationsRouter } from "./operations";
 import { dashboard } from "./dashboard";
@@ -30,7 +31,8 @@ const pageInput = idInput.extend({
 });
 const createInput = z.object({
   name: z.string().trim().min(1).max(256),
-  message: z.string().trim().min(1).max(4096),
+  message: z.string().max(4096),
+  photoId: z.string().uuid().nullable().optional(),
   parseMode: z.enum(["HTML", "Markdown", "MarkdownV2", "None"]),
   delaySeconds: z.number().min(0.5).max(86400),
   isDryRun: z.boolean().default(true),
@@ -392,6 +394,7 @@ export const appRouter = router({
   broadcast: router(campaignRouter("bot")),
   mtproto: mtprotoRouter,
   draft: draftRouter,
+  media: mediaRouter,
   source: audienceSourceRouter,
   automation: automationRouter,
   operations: operationsRouter,

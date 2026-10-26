@@ -1,5 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
+import { requirePhotoMetadata } from "../media";
+import { PHOTO_CAPTION_MAX_LENGTH } from "../../shared/media";
 import {
   normalizeRecipient,
   senderKey,
@@ -32,8 +34,18 @@ export class DeliveryService {
     const key = senderKey(input.ownerId, input.kind);
     if (!Number.isSafeInteger(input.broadcastId) || input.broadcastId <= 0)
       throw new Error("INVALID_BROADCAST");
-    if (!input.message.trim() || input.message.length > 4096)
+    if (
+      (!input.photoId && !input.message.trim()) ||
+      input.message.length > (input.photoId ? PHOTO_CAPTION_MAX_LENGTH : 4096)
+    )
       throw new Error("INVALID_MESSAGE_LENGTH");
+    if (input.photoId && input.kind !== "mtproto")
+      throw new Error("PHOTO_REQUIRES_MTPROTO");
+    if (
+      (input.photoId && !/^[a-f0-9]{64}$/.test(input.photoSha256 ?? "")) ||
+      (!input.photoId && input.photoSha256)
+    )
+      throw new Error("INVALID_PHOTO_SNAPSHOT");
     if (
       !Number.isFinite(input.delaySeconds) ||
       input.delaySeconds < 0 ||
@@ -76,17 +88,30 @@ export class DeliveryService {
           scheduled: input.scheduledAt?.toISOString() ?? null,
           expires: input.expiresAt?.toISOString() ?? null,
           senderFingerprint: input.senderFingerprint ?? null,
+          // Preserve the hash of existing text-only snapshots across the rollout.
+          ...(input.photoId
+            ? { photoId: input.photoId, photoSha256: input.photoSha256 }
+            : {}),
         })
       )
       .digest("hex");
     return transaction(this.pool, async client => {
+      if (input.photoId) {
+        const photo = await requirePhotoMetadata(
+          input.ownerId,
+          input.photoId,
+          client
+        );
+        if (photo.sha256 !== input.photoSha256)
+          throw new Error("PHOTO_SNAPSHOT_CHANGED");
+      }
       await client.query(
         "INSERT INTO sender_controls(sender_key,owner_id,kind) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
         [key, input.ownerId, input.kind]
       );
       const inserted = await client.query(
-        `INSERT INTO delivery_campaigns(owner_id,kind,broadcast_id,sender_key,snapshot_hash,message,parse_mode,delay_seconds,is_dry_run,scheduled_at,expires_at,sender_fingerprint)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(owner_id,kind,broadcast_id) DO NOTHING RETURNING id`,
+        `INSERT INTO delivery_campaigns(owner_id,kind,broadcast_id,sender_key,snapshot_hash,message,parse_mode,delay_seconds,is_dry_run,scheduled_at,expires_at,sender_fingerprint,photo_id,photo_sha256)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT(owner_id,kind,broadcast_id) DO NOTHING RETURNING id`,
         [
           input.ownerId,
           input.kind,
@@ -100,6 +125,8 @@ export class DeliveryService {
           scheduledAt,
           input.expiresAt ?? null,
           input.senderFingerprint ?? null,
+          input.photoId ?? null,
+          input.photoSha256 ?? null,
         ]
       );
       if (!inserted.rowCount) {
