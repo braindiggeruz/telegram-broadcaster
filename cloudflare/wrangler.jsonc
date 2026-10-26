@@ -22,6 +22,8 @@
     "LIVE_SEND_ENABLED": "false",
     "WORKER_MODE": "scheduled",
     "DATABASE_SSL": "verify-full",
+    "DATABASE_TRANSPORT": "supabase-relay",
+    "DATABASE_RELAY_URL": "https://pdulckpafwbgpgotfzir.supabase.co/functions/v1/tg-postgres-relay",
     "CONTACT_MIN_INTERVAL_SECONDS": "86400",
   },
   "triggers": {

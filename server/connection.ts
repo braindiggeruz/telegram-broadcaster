@@ -1,5 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Pool, type PoolConfig } from "pg";
+import {
+  createSupabaseRelayStream,
+  supabaseRelayConfiguration,
+} from "./supabaseRelay";
 
 let pool: Pool | undefined;
 const databaseScope = new AsyncLocalStorage<Pool>();
@@ -50,10 +54,14 @@ export function databasePoolConfig(
       throw new Error("DATABASE_URL connection overrides are not allowed");
     if (tlsOverrides.has(key.toLowerCase())) url.searchParams.delete(key);
   }
+  const relay =
+    env.DATABASE_TRANSPORT === "supabase-relay"
+      ? supabaseRelayConfiguration(env, url)
+      : undefined;
   return {
     connectionString: url.toString(),
     ssl:
-      env.DATABASE_SSL === "disable"
+      relay || env.DATABASE_SSL === "disable"
         ? false
         : {
             rejectUnauthorized: true,
@@ -62,7 +70,15 @@ export function databasePoolConfig(
               : {}),
           },
     max: 10,
-    connectionTimeoutMillis: 5000,
+    ...(relay
+      ? {
+          // Outer WSS is verified HTTPS. The private relay establishes and
+          // verifies upstream TLS before accepting PostgreSQL protocol bytes.
+          stream: createSupabaseRelayStream(relay),
+          enableChannelBinding: false,
+        }
+      : {}),
+    connectionTimeoutMillis: relay ? 15000 : 5000,
     idleTimeoutMillis: 30000,
     application_name: "tg-sender-v2",
   };

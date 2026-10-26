@@ -1,6 +1,6 @@
 # TG Sender на Cloudflare Workers
 
-Состояние на 26 октября 2026 года: **адаптация подготовлена, Supabase ещё не подключён, публичного deployment нет**. Новые платные ресурсы не созданы. `LIVE_SEND_ENABLED=false`. Адрес `https://tg-sender-v2.braindigger-uz.workers.dev` записан как ожидаемый origin; это не подтверждение работающего сервиса.
+Состояние на 26 октября 2026 года: **Supabase подключён, публикация и сквозная приёмка продолжаются**. Успешный вход через публичный Workers endpoint пока не подтверждён. `LIVE_SEND_ENABLED=false`. Адрес `https://tg-sender-v2.braindigger-uz.workers.dev` записан как origin; наличие конфигурации или deployment само по себе не подтверждает готовность сервиса.
 
 ## Архитектура и бюджет
 
@@ -11,6 +11,20 @@ Workers Assets обслуживает интерфейс; Workers HTTP adapter �
 Supabase Free включает 500 MB базы, 1 GB файлового хранилища и 5 GB egress; допускает два активных проекта. Проекты могут приостанавливаться после недели неактивности, поэтому бесплатная БД **не даёт гарантии непрерывной доступности**. Перед созданием проверяется Free-план организации и свободное место для проекта. Pro, IPv4 add-on и другие платные опции для выбранной схемы не нужны и не включаются. [Supabase pricing](https://supabase.com/pricing).
 
 Для соединения нужен direct PostgreSQL либо **session pool на 5432** с проверяемым TLS. Transaction pool на 6543 и Hyperdrive не подходят существующей очереди: session advisory lock удерживается через весь внешний вызов. Поддержку session locks и реальные права проверяют именно на выбранном endpoint. [Supabase connections](https://supabase.com/docs/guides/database/connecting-to-postgres), [Hyperdrive limitations](https://developers.cloudflare.com/hyperdrive/reference/supported-databases-and-features/).
+
+### Защищённое соединение Workers с PostgreSQL
+
+Для Workers выбран `DATABASE_TRANSPORT=supabase-relay`. Прямое соединение из workerd не прошло проверку цепочки CA Supabase; отключение проверки сертификата не используется. Вместо этого `server/supabaseRelay.ts` передаёт PostgreSQL protocol по защищённой WebSocket-сессии в отдельную Supabase Edge Function `supabase/functions/tg-postgres-relay/index.ts`.
+
+Worker принимает только точный HTTPS endpoint `https://pdulckpafwbgpgotfzir.supabase.co/functions/v1/tg-postgres-relay`. В общем контракте имя проекта состоит из 20 строчных латинских букв; query, fragment, credentials в URL, явный порт и перенаправления отклоняются. Цель PostgreSQL также фиксирована: `aws-1-eu-central-1.pooler.supabase.com:5432`, база `postgres`, пользователь приложения `tg_sender_v2.<project-ref>`. Relay не предоставляет выбор произвольного хоста или transaction pool.
+
+Edge Function развёртывается с `verify_jwt=true`. Worker передаёт anon JWT того же проекта в `Authorization` и отдельный `DATABASE_RELAY_TOKEN` в `x-tg-relay-token`. Token — 43-символьный base64url без padding: HMAC-SHA256 от UTF-8 строки `tg-sender:postgres-relay:v1`, ключ — Supabase service role key. Вычисление выполняется приватно при настройке; token передаётся через Cloudflare Secrets без вывода в журналы. Service role key остаётся в Supabase и backup-задаче, **в Worker и браузер он не передаётся**. Anon JWT сам по себе не даёт доступа к relay: Edge Function дополнительно проверяет HMAC. При ротации service role key требуется пересчитать relay token.
+
+До HTTP upgrade функция открывает фиксированный PostgreSQL TCP socket, выполняет SSLRequest, `Deno.startTls` с hostname и доверенным CA Supabase, затем дожидается успешного TLS handshake. Только после этого принимает WebSocket. Внутренний `pg` stream использует `ssl:false` и отключённый channel binding исключительно внутри этой схемы: внешнее HTTPS/WSS и upstream PostgreSQL TLS проверяются на своих участках. Настройка `DATABASE_SSL=verify-full` сохраняется как требование политики, а не как обход проверки.
+
+**Одна WebSocket-сессия соответствует одному PostgreSQL соединению**. Поток создаётся заново для каждого клиента пула; session advisory locks сохраняются до закрытия соединения. Прерванная сессия не переподключается автоматически и не продолжает неизвестную отправку. Соединения и поздно завершившиеся попытки закрываются при ошибке или таймауте. Срок жизни сессии ограничен 90 секундами; максимальный кадр — 3 MiB, локальная очередь — 8 MiB. Edge Function допускает до 12 одновременных соединений **на один isolate**, это не общий лимит проекта и не ограничение расходов. Cloudflare WebSocket не предоставляет подтверждения доставки `send()` или обычного stream backpressure; лимиты буферов и таймауты обязательны. [Workers WebSocket API](https://developers.cloudflare.com/workers/runtime-apis/websockets/).
+
+Обычный Node/Docker runtime и `scripts/cloud-backup.ts` продолжают использовать прямой PostgreSQL TCP с проверяемым TLS. Для них `DATABASE_TRANSPORT` не задаётся либо равен `tcp`; relay bindings не нужны. Включать relay для `pg_dump` не следует.
 
 ## Что уже подготовлено в коде
 
@@ -50,9 +64,9 @@ Wrangler закреплён на `4.152.0`. `scripts/build-cloudflare.mjs` за�
 
 ## Что остаётся для публикации
 
-1. Подключить отдельный Supabase Free проект и проверить тариф, endpoint session/direct, TLS, PostgreSQL-версию и права. PostgreSQL 17 backup client требует совместимой версии сервера.
+1. Подтвердить Free-план отдельного Supabase проекта, PostgreSQL-версию и права. Для Workers проверить TLS через защищённый relay, для Node backup — session/direct TCP endpoint. PostgreSQL 17 backup client требует совместимой версии сервера.
 2. Применить миграции, затем `scripts/secure-supabase.sql`; проверить запрет доступа к прикладным таблицам через Data API. Существующие данные переносить только вместе с исходным ключом шифрования; новая пустая БД — отдельная установка.
-3. Передать runtime secrets через Cloudflare Secrets: `DATABASE_URL`, при необходимости `DATABASE_CA`, `OWNER_OPEN_ID`, `OWNER_PASSWORD_HASH`, `SESSION_SECRET`, `ENCRYPTION_KEY`, `TELEGRAM_WEBHOOK_SECRET`. Для личного аккаунта дополнительно нужны собственные `TELEGRAM_API_ID` и `TELEGRAM_API_HASH`. Открытый пароль, токены и ключи не помещать в `wrangler.jsonc`, исходники, bundle или журналы.
+3. Передать runtime secrets через Cloudflare Secrets: `DATABASE_URL`, `DATABASE_RELAY_TOKEN`, `DATABASE_RELAY_ANON_KEY`, `OWNER_OPEN_ID`, `OWNER_PASSWORD_HASH`, `SESSION_SECRET`, `ENCRYPTION_KEY`, `TELEGRAM_WEBHOOK_SECRET`. `DATABASE_TRANSPORT=supabase-relay` и точный `DATABASE_RELAY_URL` задаются конфигурацией Worker. Для прямого TCP backup отдельно передаются URL и доверенный `DATABASE_CA`. Для личного аккаунта дополнительно нужны собственные `TELEGRAM_API_ID` и `TELEGRAM_API_HASH`. Открытый пароль, токены и ключи не помещать в `wrangler.jsonc`, исходники, bundle или журналы.
 4. Оставить `LIVE_SEND_ENABLED=false`, `WORKER_MODE=scheduled`, `DATABASE_SSL=verify-full`; проверить точный `APP_ORIGIN`. Опубликовать прошедшую проверки версию с той же настройкой `WRANGLER_BUILD_PLATFORM=node` и проверить фактический URL.
 5. Подключить и проверить облачный бэкап по следующему разделу. Зафиксировать версию Worker, версию схемы и безопасный порядок отката.
 

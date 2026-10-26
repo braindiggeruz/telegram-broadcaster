@@ -243,6 +243,8 @@ async function run() {
       ...parsed.config.vars,
       APP_ORIGIN: base,
       DATABASE_SSL: "disable",
+      DATABASE_TRANSPORT: "tcp",
+      DATABASE_RELAY_URL: "",
       WORKER_MODE: "scheduled",
       LIVE_SEND_ENABLED: "false",
     },
