@@ -31,6 +31,9 @@ export interface DeliveryRequest {
   /** Canonical chat:<signed id>, phone:+<digits>, or username:<name>. */
   recipient: string;
   message: string;
+  /** Owner-scoped immutable photo pinned when the campaign was approved. */
+  photoId?: string | null;
+  photoSha256?: string | null;
   parseMode: ParseMode;
   deliveryId: string;
   /** Persisted positive 63-bit value; MTProto must reuse it for this logical message. */
@@ -48,6 +51,8 @@ export interface EnqueueInput {
   kind: SenderKind;
   broadcastId: number;
   message: string;
+  photoId?: string | null;
+  photoSha256?: string | null;
   parseMode?: ParseMode;
   recipients: string[];
   delaySeconds: number;

@@ -62,6 +62,11 @@ describe.skipIf(!url)("durable delivery on PostgreSQL", () => {
         )
       );
     }
+    // This queue-only fixture deliberately omits the legacy app tables required by 014.
+    // Full media/schema migration coverage lives in photo-campaigns.integration.test.ts.
+    await pool.query(
+      "ALTER TABLE delivery_campaigns ADD COLUMN photo_id uuid, ADD COLUMN photo_sha256 text"
+    );
     service = new DeliveryService(pool);
   });
   afterAll(async () => {

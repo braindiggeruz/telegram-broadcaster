@@ -1,4 +1,5 @@
-import React, { Fragment, type ReactNode } from "react";
+import React, { Fragment, useEffect, useState, type ReactNode } from "react";
+import type { PhotoAttachment } from "@shared/media";
 
 export function safePreviewUrl(raw: string): string | null {
   try {
@@ -90,19 +91,43 @@ export function previewNodes(text: string, mode: string, depth = 0): ReactNode {
 export default function MessagePreview({
   message,
   parseMode,
+  photo,
 }: {
   message: string;
   parseMode: string;
+  photo?: Pick<PhotoAttachment, "url" | "name"> | null;
 }) {
+  const [imageError, setImageError] = useState(false);
+  useEffect(() => {
+    setImageError(false);
+  }, [photo?.url]);
   return (
     <div className="space-y-3">
-      <div className="rounded-2xl rounded-tl-sm border border-primary/15 bg-primary/5 p-4 text-sm leading-relaxed whitespace-pre-wrap break-words">
-        {message ? (
-          previewNodes(message, parseMode)
-        ) : (
-          <span className="text-muted-foreground">
-            Здесь появится ваше сообщение
-          </span>
+      <div className="overflow-hidden rounded-2xl rounded-tl-sm border border-primary/15 bg-primary/5 text-sm leading-relaxed break-words">
+        {photo &&
+          (imageError ? (
+            <p role="alert" className="p-4 text-xs text-amber-400">
+              Не удалось показать картинку. Обновите страницу или выберите файл
+              ещё раз.
+            </p>
+          ) : (
+            <img
+              src={photo.url}
+              alt={`Картинка сообщения: ${photo.name}`}
+              onError={() => setImageError(true)}
+              className="block max-h-80 w-full object-contain bg-black/10"
+            />
+          ))}
+        {(message || !photo) && (
+          <div className="p-4 whitespace-pre-wrap">
+            {message ? (
+              previewNodes(message, parseMode)
+            ) : (
+              <span className="text-muted-foreground">
+                Здесь появится ваше сообщение
+              </span>
+            )}
+          </div>
         )}
       </div>
       <p className="text-xs text-muted-foreground">

@@ -7,6 +7,8 @@ import type { Broadcast } from "../drizzle/schema";
 import type { SenderKind, ParseMode } from "./delivery/types";
 import { normalizeRecipient } from "./delivery/types";
 import { senderFingerprint } from "./senderIdentity";
+import { getPhotoMetadata, requirePhotoMetadata } from "./media";
+import { PHOTO_CAPTION_MAX_LENGTH } from "../shared/media";
 
 export interface CampaignInput {
   name: string;
@@ -17,6 +19,34 @@ export interface CampaignInput {
   recipientListId: number;
   requestKey?: string;
   approved?: boolean;
+  photoId?: string | null;
+}
+type CampaignBroadcast = Broadcast & {
+  photoId?: string | null;
+  photoSha256?: string | null;
+  photo_sha256?: string | null;
+};
+
+export function validateCampaignContent(
+  kind: SenderKind,
+  message: string,
+  photoId?: string | null
+) {
+  if (photoId && kind !== "mtproto")
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "Фото доступно для рассылки от аккаунта",
+    });
+  if (
+    message.length > (photoId ? PHOTO_CAPTION_MAX_LENGTH : 4096) ||
+    (!photoId && !message.trim())
+  )
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: photoId
+        ? "Подпись к фото — до 1024 символов, включая разметку"
+        : "Введите сообщение длиной до 4096 символов",
+    });
 }
 export async function createCampaign(
   ownerId: number,
@@ -25,6 +55,11 @@ export async function createCampaign(
   explicitRecipients?: string[],
   expectedSenderFingerprint?: string | null
 ) {
+  validateCampaignContent(kind, input.message, input.photoId);
+  // Resolve ownership before any campaign/audit writes, including an idempotent retry.
+  const photo = input.photoId
+    ? await requirePhotoMetadata(ownerId, input.photoId)
+    : null;
   if (!input.isDryRun && !input.approved)
     throw new TRPCError({
       code: "BAD_REQUEST",
@@ -68,7 +103,7 @@ export async function createCampaign(
         `SELECT * FROM ${table} WHERE id=$1 AND "userId"=$2`,
         [prior.rows[0].broadcast_id, ownerId]
       );
-      const bc = found.rows[0] as Broadcast;
+      const bc = found.rows[0] as CampaignBroadcast;
       const canonical = (values: string[]) =>
         JSON.stringify([...new Set(values.map(normalizeRecipient))].sort());
       if (
@@ -80,7 +115,9 @@ export async function createCampaign(
         bc.delaySeconds !==
           Math.max(kind === "bot" ? 1 : 3, input.delaySeconds) ||
         canonical(prior.rows[0].recipients) !== canonical(recipients) ||
-        prior.rows[0].sender_fingerprint !== fingerprint
+        prior.rows[0].sender_fingerprint !== fingerprint ||
+        (bc.photoId ?? null) !== (photo?.id ?? null) ||
+        (bc.photo_sha256 ?? null) !== (photo?.sha256 ?? null)
       )
         throw new TRPCError({
           code: "CONFLICT",
@@ -90,7 +127,7 @@ export async function createCampaign(
       return bc;
     }
     const r = await tx.query(
-      `INSERT INTO ${table} ("userId",name,message,"parseMode","delaySeconds","isDryRun","recipientListId","totalRecipients") VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      `INSERT INTO ${table} ("userId",name,message,"parseMode","delaySeconds","isDryRun","recipientListId","totalRecipients"${kind === "mtproto" ? ',"photoId",photo_sha256' : ""}) VALUES($1,$2,$3,$4,$5,$6,$7,$8${kind === "mtproto" ? ",$9,$10" : ""}) RETURNING *`,
       [
         ownerId,
         input.name,
@@ -100,9 +137,12 @@ export async function createCampaign(
         input.isDryRun,
         input.recipientListId,
         recipients.length,
+        ...(kind === "mtproto"
+          ? [photo?.id ?? null, photo?.sha256 ?? null]
+          : []),
       ]
     );
-    const bc = r.rows[0] as Broadcast;
+    const bc = r.rows[0] as CampaignBroadcast;
     await tx.query(
       "INSERT INTO campaign_snapshots(owner_id,kind,broadcast_id,request_key,recipients,sender_fingerprint) VALUES($1,$2,$3,$4,$5,$6)",
       [
@@ -132,7 +172,7 @@ export async function launchCampaign(
   kind: SenderKind,
   id: number
 ) {
-  const bc =
+  const bc: CampaignBroadcast | null =
     kind === "bot"
       ? await db.getBroadcast(id, ownerId)
       : await db.getMtprotoBroadcast(id, ownerId);
@@ -158,6 +198,8 @@ export async function launchCampaign(
     kind,
     broadcastId: id,
     message: bc.message,
+    photoId: bc.photoId ?? null,
+    photoSha256: bc.photoSha256 ?? bc.photo_sha256 ?? null,
     parseMode: bc.parseMode,
     delaySeconds: bc.delaySeconds,
     isDryRun: bc.isDryRun,
@@ -167,12 +209,19 @@ export async function launchCampaign(
   });
   return { started: true };
 }
-export async function enrichedCampaign<T extends Broadcast>(
+export async function enrichedCampaign<T extends CampaignBroadcast>(
   ownerId: number,
   kind: SenderKind,
   bc: T | null
 ) {
   if (!bc) return null;
   const progress = await getProgress(ownerId, kind, bc.id);
-  return { ...bc, queueStatus: progress?.status ?? bc.status, progress };
+  const photo = bc.photoId ? await getPhotoMetadata(ownerId, bc.photoId) : null;
+  return {
+    ...bc,
+    photoId: bc.photoId ?? null,
+    photo,
+    queueStatus: progress?.status ?? bc.status,
+    progress,
+  };
 }

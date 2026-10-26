@@ -1,9 +1,11 @@
-import { Api } from "telegram";
+import { Api, type TelegramClient } from "telegram";
 import bigInt from "big-integer";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { _parseMessageText } from "telegram/client/messageParse.js";
 import { getBotSettings, getMtprotoSession } from "./db";
 import { createClient } from "./mtproto";
+import { getPhotoBytes } from "./media";
+import { PHOTO_CAPTION_MAX_LENGTH, PHOTO_MAX_BYTES } from "../shared/media";
 import {
   DeliveryError,
   type DeliveryTransport,
@@ -31,9 +33,12 @@ export async function telegramRequest(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body ?? {}),
       signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-      redirect: "error",
+      // Workers support manual/follow; never follow a credential-bearing redirect.
+      redirect: "manual",
     }
   );
+  if (response.status >= 300 && response.status < 400)
+    throw new Error("TELEGRAM_RESPONSE_UNKNOWN");
   let value: unknown;
   try {
     value = await response.json();
@@ -117,7 +122,7 @@ export function classifyMtprotoError(error: unknown): DeliveryError | Error {
       code
     );
   if (
-    /^(MESSAGE_TOO_LONG|MESSAGE_EMPTY|ENTITY_BOUNDS_INVALID|ENTITIES_TOO_LONG)$/.test(
+    /^(MESSAGE_TOO_LONG|MESSAGE_EMPTY|ENTITY_BOUNDS_INVALID|ENTITIES_TOO_LONG|MEDIA_CAPTION_TOO_LONG|MEDIA_EMPTY|MEDIA_INVALID|PHOTO_INVALID|PHOTO_INVALID_DIMENSIONS|PHOTO_EXT_INVALID|IMAGE_PROCESS_FAILED|FILE_PARTS_INVALID|FILE_PART_TOO_BIG|FILE_PART_SIZE_INVALID|FILE_PART_EMPTY|FILE_PART_MISSING)$/.test(
       code
     )
   )
@@ -125,6 +130,8 @@ export function classifyMtprotoError(error: unknown): DeliveryError | Error {
   return new Error("MTPROTO_RESULT_UNKNOWN");
 }
 async function sendBot(request: DeliveryRequest) {
+  if (request.photoId || request.photoSha256)
+    throw new DeliveryError("content", "BOT_PHOTO_UNSUPPORTED");
   const settings = await getBotSettings(request.ownerId);
   if (!settings?.isValid) throw new DeliveryError("auth", "BOT_NOT_CONNECTED");
   if (
@@ -157,6 +164,92 @@ async function sendBot(request: DeliveryRequest) {
     throw new Error("BOT_RESPONSE_UNCONFIRMED");
   return { messageId: String(message.message_id) };
 }
+
+async function loadApprovedPhoto(request: DeliveryRequest) {
+  if (!request.photoId) {
+    if (request.photoSha256)
+      throw new DeliveryError("content", "PHOTO_ATTACHMENT_CHANGED");
+    return undefined;
+  }
+  if (!request.photoSha256)
+    throw new DeliveryError("content", "PHOTO_ATTACHMENT_CHANGED");
+  if (request.message.length > PHOTO_CAPTION_MAX_LENGTH)
+    throw new DeliveryError("content", "MEDIA_CAPTION_TOO_LONG");
+  let photo: Awaited<ReturnType<typeof getPhotoBytes>>;
+  try {
+    photo = await getPhotoBytes(request.ownerId, request.photoId);
+  } catch (error) {
+    const code = (error as { code?: string })?.code;
+    const unavailable =
+      code === "NOT_FOUND" ||
+      code === "BAD_REQUEST" ||
+      (error instanceof Error &&
+        /^(PHOTO_CONTENT_UNAVAILABLE|PHOTO_INTEGRITY_FAILED)$/.test(
+          error.message
+        ));
+    throw new DeliveryError(
+      unavailable ? "content" : "transient",
+      unavailable ? "PHOTO_UNAVAILABLE" : "PHOTO_LOAD_UNAVAILABLE",
+      60
+    );
+  }
+  if (
+    !photo.bytes.length ||
+    photo.bytes.length > PHOTO_MAX_BYTES ||
+    photo.attachment.size !== photo.bytes.length ||
+    photo.attachment.sha256 !== request.photoSha256 ||
+    createHash("sha256").update(photo.bytes).digest("hex") !==
+      request.photoSha256
+  )
+    throw new DeliveryError("content", "PHOTO_ATTACHMENT_CHANGED");
+  return photo;
+}
+
+async function uploadPhoto(
+  client: TelegramClient,
+  photo: NonNullable<Awaited<ReturnType<typeof loadApprovedPhoto>>>,
+  ensureActive: () => void
+): Promise<Api.InputMediaUploadedPhoto> {
+  // Avoid GramJS uploadFile/sendFile: their upload retry loop may sleep through
+  // an abort, and sendFile creates a different logical-message randomId.
+  const partSize = 128 * 1024;
+  const parts = Math.ceil(photo.bytes.length / partSize);
+  const fileId = bigInt(
+    (randomBytes(8).readBigUInt64BE() & 0x7fffffffffffffffn || 1n).toString()
+  );
+  for (let part = 0; part < parts; part++) {
+    ensureActive();
+    let accepted: boolean;
+    try {
+      accepted = await client.invoke(
+        new Api.upload.SaveFilePart({
+          fileId,
+          filePart: part,
+          bytes: photo.bytes.subarray(part * partSize, (part + 1) * partSize),
+        })
+      );
+    } catch (error) {
+      ensureActive();
+      const classified = classifyMtprotoError(error);
+      if (classified instanceof DeliveryError) throw classified;
+      // No messages.SendMedia has been issued, so this failure is safe to retry.
+      throw new DeliveryError("transient", "PHOTO_UPLOAD_UNAVAILABLE", 60);
+    }
+    ensureActive();
+    if (!accepted)
+      throw new DeliveryError("transient", "PHOTO_UPLOAD_REJECTED", 60);
+  }
+  return new Api.InputMediaUploadedPhoto({
+    file: new Api.InputFile({
+      id: fileId,
+      parts,
+      name:
+        photo.attachment.mimeType === "image/png" ? "photo.png" : "photo.jpg",
+      md5Checksum: createHash("md5").update(photo.bytes).digest("hex"),
+    }),
+  });
+}
+
 async function sendMtproto(request: DeliveryRequest) {
   const session = await getMtprotoSession(request.ownerId);
   if (!session?.isActive || !session.sessionString)
@@ -169,6 +262,7 @@ async function sendMtproto(request: DeliveryRequest) {
     throw new DeliveryError("auth", "APPROVED_SENDER_CHANGED");
   if (request.parseMode === "MarkdownV2")
     throw new DeliveryError("content", "MTPROTO_MARKDOWNV2_UNSUPPORTED");
+  const photo = await loadApprovedPhoto(request);
   const { client } = await createClient(session.sessionString);
   let aborted = false;
   let rejectAbort: (reason: Error) => void = () => {};
@@ -184,11 +278,14 @@ async function sendMtproto(request: DeliveryRequest) {
     );
   };
   request.signal.addEventListener("abort", abort, { once: true });
+  const ensureActive = () => {
+    if (aborted || request.signal.aborted) throw new Error("MTPROTO_ABORTED");
+  };
   try {
-    if (request.signal.aborted) throw new Error("MTPROTO_ABORTED");
+    ensureActive();
     const operation = (async () => {
       await client.connect();
-      if (aborted) throw new Error("MTPROTO_ABORTED");
+      ensureActive();
       let target: string | ReturnType<typeof bigInt>;
       if (request.recipient.startsWith("chat:"))
         target = bigInt(request.recipient.slice(5));
@@ -223,15 +320,29 @@ async function sendMtproto(request: DeliveryRequest) {
             ? "markdown"
             : false
       );
-      if (aborted || request.signal.aborted) throw new Error("MTPROTO_ABORTED");
+      ensureActive();
+      if (photo && message.length > PHOTO_CAPTION_MAX_LENGTH)
+        throw new DeliveryError("content", "MEDIA_CAPTION_TOO_LONG");
+      const media = photo
+        ? await uploadPhoto(client, photo, ensureActive)
+        : undefined;
+      ensureActive();
       const response = await client.invoke(
-        new Api.messages.SendMessage({
-          peer,
-          message,
-          entities,
-          randomId: bigInt(request.randomId),
-          noWebpage: true,
-        })
+        media
+          ? new Api.messages.SendMedia({
+              peer,
+              media,
+              message,
+              entities,
+              randomId: bigInt(request.randomId),
+            })
+          : new Api.messages.SendMessage({
+              peer,
+              message,
+              entities,
+              randomId: bigInt(request.randomId),
+              noWebpage: true,
+            })
       );
       if (response instanceof Api.UpdateShortSentMessage)
         return { messageId: String(response.id) };

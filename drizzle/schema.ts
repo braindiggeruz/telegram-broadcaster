@@ -9,6 +9,7 @@ import {
   boolean,
   bigint,
   serial,
+  uuid,
 } from "drizzle-orm/pg-core";
 
 // Enums
@@ -149,6 +150,8 @@ export const mtprotoBroadcasts = pgTable("mtproto_broadcasts", {
   userId: integer("userId").notNull(),
   name: varchar("name", { length: 256 }).notNull(),
   message: text("message").notNull(),
+  photoId: uuid("photoId"),
+  photoSha256: text("photo_sha256"),
   parseMode: parseModeEnum("parseMode").default("HTML").notNull(),
   delaySeconds: real("delaySeconds").default(3.0).notNull(),
   isDryRun: boolean("isDryRun").default(false).notNull(),

@@ -219,7 +219,11 @@ export default function BroadcastReport({
       </p>
       <section className="rounded-xl border border-border bg-card p-5">
         <h2 className="font-medium text-sm mb-3">Утверждённое сообщение</h2>
-        <MessagePreview message={bc.message} parseMode={bc.parseMode} />
+        <MessagePreview
+          message={bc.message}
+          parseMode={bc.parseMode}
+          photo={transport === "mtproto" ? account.data?.photo : null}
+        />
       </section>
       <section className="space-y-3">
         <h2 className="font-medium">

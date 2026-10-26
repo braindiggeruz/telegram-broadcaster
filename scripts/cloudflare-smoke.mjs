@@ -397,13 +397,16 @@ async function run() {
       `${base}/__scheduled?cron=${encodeURIComponent("* * * * *")}`,
       { signal: signal(65_000) }
     );
-    const acknowledged = (await response.text()).trim() === "Ran scheduled event";
+    const acknowledged =
+      (await response.text()).trim() === "Ran scheduled event";
     if (!response.ok || !acknowledged) {
-      console.error(JSON.stringify({
-        check: "cron_dispatch",
-        status: response.status,
-        scheduledAcknowledged: acknowledged,
-      }));
+      console.error(
+        JSON.stringify({
+          check: "cron_dispatch",
+          status: response.status,
+          scheduledAcknowledged: acknowledged,
+        })
+      );
       throw new SmokeError("cron_invocation_failed");
     }
   }
@@ -429,6 +432,95 @@ async function run() {
   );
   const operations = await rpc("operations.status");
   check("live_sends_remain_disabled", operations.liveSendEnabled === false);
+
+  // Exercise the real Workers binary response/crypto/PG path, not just Node mocks.
+  const photoBytes = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aM1kAAAAASUVORK5CYII=",
+    "base64"
+  );
+  const photo = await rpc(
+    "media.uploadPhoto",
+    {
+      name: "ci-photo.png",
+      mimeType: "image/png",
+      dataBase64: photoBytes.toString("base64"),
+    },
+    true
+  );
+  check(
+    "photo_upload_metadata_only",
+    photo.size === photoBytes.length &&
+      photo.url === `/api/media/${photo.id}` &&
+      !photo.dataBase64 &&
+      !photo.content_encrypted
+  );
+  const image = await fetch(base + photo.url, {
+    headers: { Cookie: cookie },
+    signal: signal(),
+  });
+  check(
+    "private_photo_binary_response",
+    image.ok &&
+      image.headers.get("content-type") === "image/png" &&
+      Buffer.from(await image.arrayBuffer()).equals(photoBytes)
+  );
+  const deniedImage = await fetch(base + photo.url, { signal: signal() });
+  check("anonymous_photo_denied", deniedImage.status === 401);
+  await rpc(
+    "draft.save",
+    {
+      key: "mtproto",
+      message: "",
+      parseMode: "None",
+      photoId: photo.id,
+      expectedVersion: 0,
+    },
+    true
+  );
+  const photoDraft = await rpc("draft.get", { key: "mtproto" });
+  check(
+    "photo_draft_persisted",
+    photoDraft.photoId === photo.id && photoDraft.photo?.sha256 === photo.sha256
+  );
+  const photoList = await rpc(
+    "recipients.upload",
+    {
+      name: "Photo CI",
+      content: JSON.stringify(["123456703"]),
+      fileType: "json",
+      recipientType: "chat_id",
+      consentSource: "Synthetic photo CI",
+      consentConfirmed: true,
+      permissionTransport: "mtproto",
+    },
+    true
+  );
+  const photoCampaign = await rpc(
+    "mtproto.createBroadcast",
+    {
+      name: "Photo-only CI",
+      message: "",
+      parseMode: "None",
+      delaySeconds: 3,
+      isDryRun: true,
+      recipientListId: photoList.id,
+      requestKey: randomUUID(),
+      approved: true,
+      photoId: photo.id,
+    },
+    true
+  );
+  await rpc("mtproto.launchBroadcast", { id: photoCampaign.id }, true);
+  await cron();
+  const photoProgress = await rpc("mtproto.getProgress", {
+    id: photoCampaign.id,
+  });
+  check(
+    "photo_only_cron_dry_run",
+    photoProgress.dryRun === 1 &&
+      photoProgress.pending === 0 &&
+      photoProgress.accepted === 0
+  );
 }
 
 for (const name of ["SIGINT", "SIGTERM"])

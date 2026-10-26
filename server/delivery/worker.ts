@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { getPool } from "../connection";
+import { getPhotoMetadata } from "../media";
 import {
   DeliveryError,
   safeCode,
@@ -23,6 +24,8 @@ type Claim = {
   random_id: string;
   attempt_id: string;
   sender_fingerprint: string | null;
+  photo_id: string | null;
+  photo_sha256: string | null;
 };
 
 function nonnegativeSetting(
@@ -124,7 +127,7 @@ async function claimNext(
   await client.query("BEGIN");
   try {
     const candidate = await client.query(
-      `SELECT d.id,d.campaign_id,d.recipient,d.random_id,c.owner_id,c.kind,c.sender_key,c.message,c.parse_mode,c.delay_seconds,c.is_dry_run,c.sender_fingerprint
+      `SELECT d.id,d.campaign_id,d.recipient,d.random_id,c.owner_id,c.kind,c.sender_key,c.message,c.parse_mode,c.delay_seconds,c.is_dry_run,c.sender_fingerprint,c.photo_id,c.photo_sha256
       FROM delivery_campaigns c JOIN deliveries d ON d.campaign_id=c.id JOIN sender_controls s ON s.sender_key=c.sender_key
       WHERE c.sender_key=$1 AND c.status IN ('queued','running') AND c.cancel_requested_at IS NULL
         AND c.scheduled_at<=now() AND (c.expires_at IS NULL OR c.expires_at>now()) AND d.state='pending' AND d.available_at<=now()
@@ -229,6 +232,21 @@ async function processClaim(
     );
     return;
   }
+  // A dry-run must reject an unavailable or changed attachment too; it may never silently
+  // turn an approved photo campaign into a text campaign. Use this worker's held client.
+  if (claim.photo_id || claim.photo_sha256) {
+    const photo = claim.photo_id
+      ? await getPhotoMetadata(Number(claim.owner_id), claim.photo_id, client)
+      : null;
+    if (
+      claim.kind !== "mtproto" ||
+      !photo ||
+      photo.sha256 !== claim.photo_sha256
+    ) {
+      await finishClaim(client, claim, "failed", "PHOTO_SNAPSHOT_UNAVAILABLE");
+      return;
+    }
+  }
   if (claim.is_dry_run) {
     await finishClaim(client, claim, "dry_run", null);
     return;
@@ -260,6 +278,8 @@ async function processClaim(
       randomId: claim.random_id,
       signal: controller.signal,
       senderFingerprint: claim.sender_fingerprint ?? undefined,
+      photoId: claim.photo_id ?? undefined,
+      photoSha256: claim.photo_sha256 ?? undefined,
     });
   } catch (caught) {
     error = caught;
