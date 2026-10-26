@@ -29,6 +29,12 @@ describe("Telegram rejection classifier", () => {
       category: "restricted",
     });
     expect(
+      classifyMtprotoError({ errorMessage: "PHONE_NOT_OCCUPIED" })
+    ).toMatchObject({
+      category: "recipient",
+      code: "PHONE_NOT_OCCUPIED",
+    });
+    expect(
       classifyMtprotoError({ errorMessage: "FLOOD_WAIT_600", seconds: 600 })
     ).toMatchObject({ category: "cooldown", retryAfterSeconds: 600 });
     expect(

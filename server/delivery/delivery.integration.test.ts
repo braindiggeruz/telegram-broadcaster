@@ -110,6 +110,89 @@ describe.skipIf(!url)("durable delivery on PostgreSQL", () => {
       ...extra,
     });
 
+  it("reserves a bounded phone-lookup lease and releases only its own lease to normal pacing", async () => {
+    await prepare({ kind: "mtproto", recipients: ["phone:+19990000000"] });
+    const send = vi.fn(async () => {
+      const row = (
+        await pool.query(
+          "SELECT EXTRACT(EPOCH FROM(next_send_at-now()))::double precision AS seconds FROM sender_controls"
+        )
+      ).rows[0];
+      expect(row.seconds).toBeGreaterThan(20);
+      expect(row.seconds).toBeLessThanOrEqual(23.1);
+      return { messageId: "synthetic-phone-message" };
+    });
+    await worker({ send }, { dispatchTimeoutMs: 20_000 });
+    const row = (
+      await pool.query(
+        "SELECT EXTRACT(EPOCH FROM(next_send_at-now()))::double precision AS seconds FROM sender_controls"
+      )
+    ).rows[0];
+    expect(row.seconds).toBeGreaterThan(0);
+    expect(row.seconds).toBeLessThanOrEqual(3.1);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(await service.getProgress(base.ownerId, "mtproto", 1)).toMatchObject(
+      { accepted: 1, status: "completed" }
+    );
+  });
+
+  it("does not shorten a pacing deadline written after the phone-lookup reservation", async () => {
+    await prepare({ kind: "mtproto", recipients: ["phone:+19990000000"] });
+    const send = vi.fn(async () => {
+      await pool.query(
+        "UPDATE sender_controls SET next_send_at=now()+interval '1 hour'"
+      );
+      return { messageId: "synthetic-phone-message" };
+    });
+    await worker({ send }, { dispatchTimeoutMs: 20_000 });
+    const row = (
+      await pool.query(
+        "SELECT EXTRACT(EPOCH FROM(next_send_at-now()))::double precision AS seconds FROM sender_controls"
+      )
+    ).rows[0];
+    expect(row.seconds).toBeGreaterThan(3590);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains the committed phone-lookup lease when outcome persistence fails and blocks another recipient after recovery", async () => {
+    await prepare({
+      kind: "mtproto",
+      recipients: ["phone:+19990000000", "phone:+19990000001"],
+    });
+    await pool.query(`CREATE FUNCTION reject_phone_result() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'synthetic-result-persistence-failure'; END $$`);
+    await pool.query(`CREATE TRIGGER reject_phone_result BEFORE UPDATE OF state ON deliveries
+      FOR EACH ROW WHEN (NEW.state='accepted') EXECUTE FUNCTION reject_phone_result()`);
+    const send = vi.fn(async () => ({ messageId: "synthetic-phone-message" }));
+    try {
+      await expect(
+        worker({ send }, { dispatchTimeoutMs: 20_000 })
+      ).rejects.toThrow("synthetic-result-persistence-failure");
+      const row = (
+        await pool.query(
+          "SELECT EXTRACT(EPOCH FROM(next_send_at-now()))::double precision AS seconds FROM sender_controls"
+        )
+      ).rows[0];
+      expect(row.seconds).toBeGreaterThan(3);
+      expect(row.seconds).toBeLessThanOrEqual(23.1);
+      expect(
+        await service.getProgress(base.ownerId, "mtproto", 1)
+      ).toMatchObject({ inflight: 1, pending: 1, accepted: 0 });
+      expect(await worker({ send }, { dispatchTimeoutMs: 20_000 })).toEqual({
+        worked: false,
+      });
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(
+        await service.getProgress(base.ownerId, "mtproto", 1)
+      ).toMatchObject({ unknown: 1, pending: 1, accepted: 0 });
+    } finally {
+      await pool.query(
+        "DROP TRIGGER IF EXISTS reject_phone_result ON deliveries"
+      );
+      await pool.query("DROP FUNCTION IF EXISTS reject_phone_result()");
+    }
+  });
+
   it("atomically deduplicates concurrent launch and keeps the original immutable snapshot", async () => {
     const results = await Promise.all([prepare(), prepare()]);
     expect(results.filter(x => x.enqueued)).toHaveLength(1);
