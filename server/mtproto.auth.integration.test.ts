@@ -77,6 +77,8 @@ describe.skipIf(!url)("durable encrypted Telegram auth on PostgreSQL", () => {
     return {
       sendPhoneCode: (...args: Parameters<typeof auth.sendPhoneCode>) =>
         connection.runWithDatabaseScope(() => auth.sendPhoneCode(...args)),
+      getAuthStatus: (...args: Parameters<typeof auth.getAuthStatus>) =>
+        connection.runWithDatabaseScope(() => auth.getAuthStatus(...args)),
       signInWithCode: (...args: Parameters<typeof auth.signInWithCode>) =>
         connection.runWithDatabaseScope(() => auth.signInWithCode(...args)),
       signInWithPassword: (
@@ -225,6 +227,52 @@ describe.skipIf(!url)("durable encrypted Telegram auth on PostgreSQL", () => {
   );
 
   integrationTest(
+    "restores masked pending auth and accurate quota without consuming attempts",
+    async () => {
+      const auth = await newRequestModule();
+      await auth.sendPhoneCode(55111, "+998900000000");
+      const first = await auth.getAuthStatus(55111);
+      expect(first.pending).toMatchObject({
+        step: "code",
+        codeAttemptsRemaining: 5,
+        delivery: "unknown",
+      });
+      expect(first.pending?.maskedPhone).not.toContain("998900000000");
+      expect(first.attemptsRemaining).toBe(2);
+      expect(
+        Date.parse(first.retryAt!) - Date.parse(first.serverNow)
+      ).toBeGreaterThan(50_000);
+      expect(JSON.stringify(first)).not.toMatch(
+        /phoneCodeHash|sessionString|payload_encrypted|synthetic-hash/
+      );
+      await auth.getAuthStatus(55111);
+      const row = (
+        await pool.query(
+          "SELECT c.sent_count,p.payload_encrypted FROM mtproto_auth_controls c JOIN mtproto_pending_auth p USING(user_id) WHERE user_id=55111"
+        )
+      ).rows[0];
+      expect(row.sent_count).toBe(1);
+      expect(
+        JSON.parse(decryptSecret(row.payload_encrypted, "mtproto-auth:55111"))
+          .attempts
+      ).toBe(0);
+      await pool.query(
+        "UPDATE mtproto_auth_controls SET sent_count=3,window_started_at=now()-interval '14 minutes',next_code_at=now()-interval '30 seconds' WHERE user_id=55111"
+      );
+      const limited = await auth.getAuthStatus(55111);
+      expect(limited.attemptsRemaining).toBe(0);
+      expect(
+        Date.parse(limited.retryAt!) - Date.parse(limited.serverNow)
+      ).toBeGreaterThan(50_000);
+      expect(limited.pending?.step).toBe("code");
+      const otherOwner = await auth.getAuthStatus(55112);
+      expect(otherOwner.pending).toBeNull();
+      expect(otherOwner.retryAt).toBeNull();
+      expect(otherOwner.attemptsRemaining).toBe(3);
+    }
+  );
+
+  integrationTest(
     "refuses a concurrent request on another pool and keeps code throttling after release",
     async () => {
       let sendStarted!: () => void;
@@ -256,6 +304,10 @@ describe.skipIf(!url)("durable encrypted Telegram auth on PostgreSQL", () => {
       }
       await expect(
         (await newRequestModule()).sendPhoneCode(55105, "+998900000000")
+      ).resolves.toMatchObject({ reused: true });
+      expect(transport.clients).toHaveLength(1);
+      await expect(
+        (await newRequestModule()).sendPhoneCode(55105, "+998900000000", true)
       ).rejects.toMatchObject({ code: "TOO_MANY_REQUESTS" });
       expect(transport.clients).toHaveLength(1);
     }

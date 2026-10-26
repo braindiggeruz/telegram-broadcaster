@@ -34,6 +34,7 @@ vi.mock("telegram/extensions/Logger.js", () => ({
 }));
 vi.mock("telegram/sessions/index.js", () => ({
   StringSession: class {
+    dcId = 4;
     constructor(public value: string) {}
     save() {
       return "synthetic-saved-session";
@@ -87,6 +88,7 @@ vi.mock("telegram", () => {
 import {
   createClient,
   getApiCredentials,
+  getAuthStatus,
   sendPhoneCode,
   signInWithCode,
   signInWithPassword,
@@ -104,6 +106,20 @@ beforeEach(() => {
     .mockImplementation(async (sql: string, params: any[] = []) => {
       if (sql.includes("pg_try_advisory_lock"))
         return { rows: [{ acquired: mocks.acquired }], rowCount: 1 };
+      if (sql.includes("AS server_now"))
+        return {
+          rowCount: 1,
+          rows: mocks.throttleAllowed
+            ? []
+            : [
+                {
+                  server_now: new Date(),
+                  sent_count: 1,
+                  window_started_at: new Date(),
+                  next_code_at: new Date(Date.now() + 60_000),
+                },
+              ],
+        };
       if (sql.includes("INSERT INTO mtproto_auth_controls"))
         return { rowCount: mocks.throttleAllowed ? 1 : 0, rows: [] };
       if (sql.includes("DELETE FROM mtproto_pending_auth")) {
@@ -151,6 +167,275 @@ afterEach(() => {
 });
 
 describe("request-scoped MTProto authentication", () => {
+  it("corrects one completed GramJS DC redirect without enabling general retries", async () => {
+    mocks.invoke.mockImplementationOnce(async () => {
+      mocks.clients[0].session.dcId = 2;
+      throw new Error("Request was unsuccessful 1 time(s)");
+    });
+    await expect(sendPhoneCode(116, "+998900000000")).resolves.toEqual({
+      phoneCodeHash: "synthetic-code-hash",
+    });
+    expect(mocks.invoke).toHaveBeenCalledTimes(2);
+    expect(mocks.invoke.mock.calls[0][0]).toBe(mocks.invoke.mock.calls[1][0]);
+    expect(
+      mocks.txQuery.mock.calls.filter(([sql]) =>
+        sql.includes("INSERT INTO mtproto_auth_controls")
+      )
+    ).toHaveLength(1);
+    expect(mocks.clients[0].options.requestRetries).toBe(1);
+    expect(mocks.records.size).toBe(1);
+  });
+
+  it("never retries a generic unsuccessful request without a proven DC change", async () => {
+    mocks.invoke.mockRejectedValueOnce(
+      new Error("Request was unsuccessful 1 time(s)")
+    );
+    await expect(sendPhoneCode(117, "+998900000000")).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+    });
+    expect(mocks.invoke).toHaveBeenCalledTimes(1);
+    expect(mocks.records.size).toBe(0);
+  });
+
+  it("does not retry flood waits even if the session DC has changed", async () => {
+    mocks.invoke.mockImplementationOnce(async () => {
+      mocks.clients[0].session.dcId = 2;
+      throw { errorMessage: "FLOOD_WAIT_120", seconds: 120 };
+    });
+    await expect(sendPhoneCode(118, "+998900000000")).rejects.toMatchObject({
+      code: "TOO_MANY_REQUESTS",
+    });
+    expect(mocks.invoke).toHaveBeenCalledTimes(1);
+    expect(
+      mocks.txQuery.mock.calls.find(([sql]) =>
+        sql.startsWith("UPDATE mtproto_auth_controls")
+      )?.[1]
+    ).toEqual([118, 120]);
+  });
+
+  it("allows at most one redirect correction", async () => {
+    mocks.invoke.mockImplementation(async () => {
+      mocks.clients[0].session.dcId =
+        mocks.invoke.mock.calls.length === 1 ? 2 : 1;
+      throw new Error("Request was unsuccessful 1 time(s)");
+    });
+    await expect(sendPhoneCode(119, "+998900000000")).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+    });
+    expect(mocks.invoke).toHaveBeenCalledTimes(2);
+    expect(mocks.records.size).toBe(0);
+  });
+
+  it("reuses a valid pending phone login without another connection or code request", async () => {
+    await sendPhoneCode(120, "+998900000000");
+    const encrypted = mocks.records.get(120)!.payload_encrypted;
+    mocks.invoke.mockClear();
+    mocks.connect.mockClear();
+    mocks.txQuery.mockClear();
+    await expect(sendPhoneCode(120, "+998 (90) 000-00-00")).resolves.toEqual({
+      phoneCodeHash: "synthetic-code-hash",
+      reused: true,
+    });
+    expect(mocks.clients).toHaveLength(1);
+    expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(mocks.connect).not.toHaveBeenCalled();
+    expect(
+      mocks.txQuery.mock.calls.some(([sql]) =>
+        sql.includes("INSERT INTO mtproto_auth_controls")
+      )
+    ).toBe(false);
+    expect(mocks.records.get(120)!.payload_encrypted).toBe(encrypted);
+  });
+
+  it("does not spend the code budget or destroy a pending login when connection fails", async () => {
+    await sendPhoneCode(121, "+998900000000");
+    const encrypted = mocks.records.get(121)!.payload_encrypted;
+    mocks.txQuery.mockClear();
+    mocks.invoke.mockClear();
+    mocks.connect.mockRejectedValueOnce(new Error("synthetic-connect-failure"));
+    await expect(
+      sendPhoneCode(121, "+998900000000", true)
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(
+      mocks.txQuery.mock.calls.some(([sql]) =>
+        sql.includes("INSERT INTO mtproto_auth_controls")
+      )
+    ).toBe(false);
+    expect(mocks.records.get(121)!.payload_encrypted).toBe(encrypted);
+    expect(mocks.clients[1].destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not spend the code budget when the initial connection times out", async () => {
+    vi.useFakeTimers();
+    mocks.connect.mockImplementationOnce(() => new Promise(() => {}));
+    const result = expect(
+      sendPhoneCode(124, "+998900000000")
+    ).rejects.toMatchObject({ code: "TIMEOUT" });
+    await vi.advanceTimersByTimeAsync(20_001);
+    await result;
+    expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(
+      mocks.txQuery.mock.calls.some(([sql]) =>
+        sql.includes("INSERT INTO mtproto_auth_controls")
+      )
+    ).toBe(false);
+    expect(mocks.records.size).toBe(0);
+    expect(mocks.release).toHaveBeenCalledWith(false);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("returns a safe network error and preserves the code budget", async () => {
+    mocks.connect.mockRejectedValueOnce(
+      Object.assign(new Error("synthetic-private-network-detail"), {
+        code: "ECONNRESET",
+      })
+    );
+    await expect(sendPhoneCode(125, "+998900000000")).rejects.toMatchObject({
+      code: "SERVICE_UNAVAILABLE",
+      message:
+        "Не удалось соединиться с Telegram. Проверьте состояние сервиса и повторите позже.",
+    });
+    expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(
+      mocks.txQuery.mock.calls.some(([sql]) =>
+        sql.includes("INSERT INTO mtproto_auth_controls")
+      )
+    ).toBe(false);
+  });
+
+  it("logs only the allowlisted failure stage and reason without raw error details", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      mocks.invoke.mockRejectedValueOnce(
+        Object.assign(new Error("synthetic-sensitive-error-detail"), {
+          errorMessage: "synthetic-sensitive-rpc-detail",
+        })
+      );
+      await expect(sendPhoneCode(127, "+998900000000")).rejects.toMatchObject({
+        code: "BAD_REQUEST",
+      });
+      expect(warning).toHaveBeenCalledWith(
+        JSON.stringify({
+          event: "telegram_auth_failure",
+          stage: "request_code",
+          reason: "UNKNOWN",
+        })
+      );
+      const output = JSON.stringify(warning.mock.calls);
+      expect(output).not.toMatch(
+        /synthetic|998900000000|phoneCodeHash|sessionString|payload_encrypted/
+      );
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it("returns only masked resumable status and preserves the longer Telegram wait", async () => {
+    mocks.invoke.mockResolvedValueOnce({
+      phoneCodeHash: "synthetic-code-hash",
+      type: { className: "auth.SentCodeTypeApp", length: 5 },
+    });
+    await sendPhoneCode(122, "+998900000000");
+    const encrypted = mocks.records.get(122)!.payload_encrypted;
+    const now = Date.now();
+    mocks.query.mockResolvedValue({
+      rowCount: 1,
+      rows: [
+        {
+          server_now: new Date(now),
+          sent_count: 3,
+          window_started_at: new Date(now - 120_000),
+          next_code_at: new Date(now + 3_600_000),
+          payload_encrypted: encrypted,
+          pending_expires_at: new Date(now + 240_000),
+        },
+      ],
+    });
+    mocks.txQuery.mockClear();
+    const status = await getAuthStatus(122);
+    expect(status).toMatchObject({
+      serverNow: new Date(now).toISOString(),
+      retryAt: new Date(now + 3_600_000).toISOString(),
+      attemptsRemaining: 0,
+      pending: {
+        step: "code",
+        codeAttemptsRemaining: 5,
+        delivery: "telegram",
+        codeLength: 5,
+      },
+    });
+    expect(status.pending?.maskedPhone).toMatch(/^\+99•+00$/);
+    const serialized = JSON.stringify(status);
+    expect(serialized).not.toContain("998900000000");
+    expect(serialized).not.toMatch(
+      /synthetic|enc:v1|phoneCodeHash|sessionString|payload_encrypted/
+    );
+    expect(mocks.txQuery).not.toHaveBeenCalled();
+    expect(mocks.records.get(122)!.payload_encrypted).toBe(encrypted);
+  });
+
+  it("reports an expired budget as available while withholding expired pending auth", async () => {
+    const now = Date.now();
+    mocks.query.mockResolvedValue({
+      rowCount: 1,
+      rows: [
+        {
+          server_now: new Date(now),
+          sent_count: 3,
+          window_started_at: new Date(now - 901_000),
+          next_code_at: new Date(now - 1_000),
+          payload_encrypted: "invalid",
+          pending_expires_at: new Date(now - 1),
+        },
+      ],
+    });
+    await expect(getAuthStatus(123)).resolves.toEqual({
+      serverNow: new Date(now).toISOString(),
+      retryAt: null,
+      attemptsRemaining: 3,
+      pending: null,
+    });
+    expect(mocks.clients).toHaveLength(0);
+    expect(mocks.txQuery).not.toHaveBeenCalled();
+  });
+
+  it("resumes the password step without consuming an auth attempt", async () => {
+    await sendPhoneCode(126, "+998900000000");
+    mocks.invoke.mockRejectedValueOnce({
+      errorMessage: "SESSION_PASSWORD_NEEDED",
+    });
+    await expect(signInWithCode(126, "12345")).rejects.toMatchObject({
+      message: "TWO_FACTOR_REQUIRED",
+    });
+    const encrypted = mocks.records.get(126)!.payload_encrypted;
+    const now = Date.now();
+    mocks.query.mockResolvedValue({
+      rowCount: 1,
+      rows: [
+        {
+          server_now: new Date(now),
+          sent_count: 1,
+          window_started_at: new Date(now),
+          next_code_at: new Date(now + 60_000),
+          payload_encrypted: encrypted,
+          pending_expires_at: new Date(now + 240_000),
+        },
+      ],
+    });
+    mocks.txQuery.mockClear();
+    await expect(getAuthStatus(126)).resolves.toMatchObject({
+      pending: {
+        step: "password",
+        codeAttemptsRemaining: 4,
+        delivery: "unknown",
+        codeLength: null,
+      },
+    });
+    expect(mocks.txQuery).not.toHaveBeenCalled();
+    expect(mocks.records.get(126)!.payload_encrypted).toBe(encrypted);
+  });
+
   it("sends and persists a formatted international phone canonically", async () => {
     await expect(
       sendPhoneCode(114, " +998\u00a0(90) 000-00.00 ")

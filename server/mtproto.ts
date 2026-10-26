@@ -8,6 +8,10 @@ import { getPool } from "./connection";
 import { getMtprotoSession } from "./db";
 import { decryptSecret, encryptSecret } from "./security/secrets";
 import { LOGIN_PHONE_ERROR, normalizeLoginPhone } from "../shared/loginPhone";
+import type {
+  LoginCodeDelivery,
+  MtprotoAuthStatus,
+} from "../shared/authStatus";
 
 export interface MtprotoClientInfo {
   client: TelegramClient;
@@ -20,6 +24,8 @@ interface PendingAuth {
   expiresAt: number;
   attempts: number;
   needsPassword: boolean;
+  delivery?: LoginCodeDelivery;
+  codeLength?: number | null;
 }
 interface SignInResult {
   sessionString: string;
@@ -34,6 +40,8 @@ interface SignInResult {
 type CommitAuth = (result: SignInResult, client: PoolClient) => Promise<void>;
 const AUTH_TTL_MS = 5 * 60 * 1000;
 const AUTH_TIMEOUT_MS = 20_000;
+const CODE_REQUEST_WINDOW_MS = 15 * 60 * 1000;
+const MAX_CODE_REQUESTS = 3;
 
 export function getApiCredentials() {
   const rawId = process.env.TELEGRAM_API_ID ?? "";
@@ -165,7 +173,11 @@ async function errorForAuth(
   error: unknown
 ): Promise<TRPCError> {
   if (error instanceof TRPCError) return error;
-  const problem = error as { errorMessage?: string; seconds?: number };
+  const problem = error as {
+    errorMessage?: string;
+    seconds?: number;
+    code?: string;
+  };
   const code = problem?.errorMessage ?? "";
   const wait = Number(problem?.seconds);
   if (/^FLOOD_WAIT(?:_\d+)?$/.test(code) && Number.isFinite(wait) && wait > 0) {
@@ -178,7 +190,31 @@ async function errorForAuth(
       message: `Telegram требует паузу ${Math.ceil(wait)} сек. Автоматический повтор отключён.`,
     });
   }
+  if (
+    [
+      "ETIMEDOUT",
+      "ECONNRESET",
+      "ECONNREFUSED",
+      "EHOSTUNREACH",
+      "ENETUNREACH",
+      "EAI_AGAIN",
+      "ENOTFOUND",
+    ].includes(problem?.code ?? "")
+  )
+    return new TRPCError({
+      code: "SERVICE_UNAVAILABLE",
+      message:
+        "Не удалось соединиться с Telegram. Проверьте состояние сервиса и повторите позже.",
+    });
   const messages: Record<string, string> = {
+    API_ID_INVALID:
+      "Telegram отклонил API ID или API Hash. Проверьте настройки приложения Telegram.",
+    API_ID_PUBLISHED_FLOOD:
+      "Telegram ограничил API ID этого приложения. Проверьте его в my.telegram.org.",
+    APP_VERSION_OUTDATED:
+      "Telegram требует обновить клиент. Сообщите об ошибке администратору сервиса.",
+    UPDATE_APP_TO_LOGIN:
+      "Telegram требует обновить клиент. Сообщите об ошибке администратору сервиса.",
     PHONE_CODE_INVALID: "Неверный код Telegram.",
     PHONE_CODE_EMPTY: "Введите код Telegram.",
     PHONE_CODE_EXPIRED: "Код Telegram истёк. Запросите новый код.",
@@ -187,6 +223,8 @@ async function errorForAuth(
     PHONE_NUMBER_BANNED:
       "Telegram ограничил этот номер. Проверьте статус аккаунта.",
     PHONE_NUMBER_FLOOD: "Telegram ограничил запросы кода. Повторите позже.",
+    PHONE_PASSWORD_FLOOD:
+      "Telegram временно ограничил попытки входа. Повторите позже.",
     AUTH_RESTART: "Telegram завершил попытку входа. Запросите новый код.",
   };
   return new TRPCError({
@@ -195,6 +233,197 @@ async function errorForAuth(
       messages[code] ??
       "Не удалось выполнить вход в Telegram. Проверьте подключение и начните вход заново.",
   });
+}
+
+function validPendingAuth(value: unknown, now: number): value is PendingAuth {
+  if (!value || typeof value !== "object") return false;
+  const state = value as PendingAuth;
+  return (
+    typeof state.sessionString === "string" &&
+    !!state.sessionString &&
+    typeof state.phoneCodeHash === "string" &&
+    !!state.phoneCodeHash &&
+    typeof state.phone === "string" &&
+    /^\+[1-9]\d{6,14}$/.test(state.phone) &&
+    Number.isFinite(state.expiresAt) &&
+    state.expiresAt > now &&
+    Number.isInteger(state.attempts) &&
+    state.attempts >= 0 &&
+    state.attempts < 5 &&
+    typeof state.needsPassword === "boolean"
+  );
+}
+
+async function readAuthStatus(
+  query: Pick<PoolClient, "query">,
+  userId: number
+): Promise<MtprotoAuthStatus> {
+  const result = await query.query(
+    `SELECT now() AS server_now,c.sent_count,c.window_started_at,c.next_code_at,
+            p.payload_encrypted,p.expires_at AS pending_expires_at
+       FROM (SELECT $1::integer AS user_id) owner
+       LEFT JOIN mtproto_auth_controls c ON c.user_id=owner.user_id
+       LEFT JOIN mtproto_pending_auth p ON p.user_id=owner.user_id`,
+    [userId]
+  );
+  const row = result.rows[0] ?? {};
+  const now = new Date(row.server_now ?? Date.now()).getTime();
+  const windowEndsAt =
+    new Date(row.window_started_at ?? 0).getTime() + CODE_REQUEST_WINDOW_MS;
+  const count =
+    windowEndsAt > now ? Math.max(0, Number(row.sent_count) || 0) : 0;
+  const retryAt = Math.max(
+    now,
+    new Date(row.next_code_at ?? 0).getTime(),
+    count >= MAX_CODE_REQUESTS ? windowEndsAt : 0
+  );
+  let pending: MtprotoAuthStatus["pending"] = null;
+  if (
+    row.payload_encrypted &&
+    new Date(row.pending_expires_at).getTime() > now
+  ) {
+    try {
+      const state: unknown = JSON.parse(
+        decryptSecret(row.payload_encrypted, `mtproto-auth:${userId}`)
+      );
+      if (validPendingAuth(state, now)) {
+        const knownDelivery = ["telegram", "sms", "call", "email"];
+        pending = {
+          step: state.needsPassword ? "password" : "code",
+          maskedPhone: `${state.phone.slice(0, 3)}${"•".repeat(state.phone.length - 5)}${state.phone.slice(-2)}`,
+          expiresAt: new Date(
+            Math.min(
+              state.expiresAt,
+              new Date(row.pending_expires_at).getTime()
+            )
+          ).toISOString(),
+          codeAttemptsRemaining: 5 - state.attempts,
+          delivery: knownDelivery.includes(state.delivery ?? "")
+            ? state.delivery!
+            : "unknown",
+          codeLength:
+            Number.isInteger(state.codeLength) &&
+            state.codeLength! >= 4 &&
+            state.codeLength! <= 8
+              ? state.codeLength!
+              : null,
+        };
+      }
+    } catch {
+      // A status read must neither expose invalid ciphertext nor consume attempts.
+    }
+  }
+  return {
+    serverNow: new Date(now).toISOString(),
+    retryAt: retryAt > now ? new Date(retryAt).toISOString() : null,
+    attemptsRemaining: Math.max(0, MAX_CODE_REQUESTS - count),
+    pending,
+  };
+}
+
+export async function getAuthStatus(
+  userId: number
+): Promise<MtprotoAuthStatus> {
+  if (!Number.isSafeInteger(userId) || userId <= 0)
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "Некорректный владелец",
+    });
+  return readAuthStatus(getPool(), userId);
+}
+
+async function assertCodeRequestAllowed(tx: PoolClient, userId: number) {
+  const status = await readAuthStatus(tx, userId);
+  if (!status.retryAt) return;
+  const seconds = Math.ceil(
+    (Date.parse(status.retryAt) - Date.parse(status.serverNow)) / 1000
+  );
+  throw new TRPCError({
+    code: "TOO_MANY_REQUESTS",
+    message: `Следующий код можно запросить через ${seconds} сек. Если код уже пришёл, продолжите его ввод.`,
+  });
+}
+
+function validDataCenter(value: number): boolean {
+  return Number.isInteger(value) && value >= 1 && value <= 5;
+}
+
+async function sendCodeFollowingRedirect(
+  client: TelegramClient,
+  session: StringSession,
+  request: Api.auth.SendCode,
+  ensureActive: () => void
+) {
+  const originalDc = session.dcId;
+  try {
+    return await client.invoke(request);
+  } catch (error) {
+    // GramJS with requestRetries=1 completes a 303 DC migration, then exits its
+    // loop before sending the request to the new DC. Correct only that proven
+    // redirect; timeouts, flood waits and unknown outcomes are never retried.
+    if (
+      !(error instanceof Error) ||
+      error.message !== "Request was unsuccessful 1 time(s)" ||
+      !validDataCenter(originalDc) ||
+      !validDataCenter(session.dcId) ||
+      session.dcId === originalDc
+    )
+      throw error;
+    ensureActive();
+    return client.invoke(request);
+  }
+}
+
+function codeDelivery(result: Api.auth.SentCode): LoginCodeDelivery {
+  const name = result.type?.className;
+  if (name === "auth.SentCodeTypeApp") return "telegram";
+  if (name === "auth.SentCodeTypeEmailCode") return "email";
+  if (
+    [
+      "auth.SentCodeTypeSms",
+      "auth.SentCodeTypeSmsWord",
+      "auth.SentCodeTypeSmsPhrase",
+    ].includes(name)
+  )
+    return "sms";
+  if (
+    [
+      "auth.SentCodeTypeCall",
+      "auth.SentCodeTypeFlashCall",
+      "auth.SentCodeTypeMissedCall",
+    ].includes(name)
+  )
+    return "call";
+  return "unknown";
+}
+
+function codeLength(result: Api.auth.SentCode): number | null {
+  const length = (result.type as { length?: unknown } | undefined)?.length;
+  return typeof length === "number" &&
+    Number.isInteger(length) &&
+    length >= 4 &&
+    length <= 8
+    ? length
+    : null;
+}
+
+async function pendingForResume(
+  tx: PoolClient,
+  userId: number
+): Promise<PendingAuth | null> {
+  const result = await tx.query(
+    "SELECT payload_encrypted FROM mtproto_pending_auth WHERE user_id=$1 AND expires_at>now()",
+    [userId]
+  );
+  if (!result.rows[0]) return null;
+  try {
+    const value: unknown = JSON.parse(
+      decryptSecret(result.rows[0].payload_encrypted, `mtproto-auth:${userId}`)
+    );
+    return validPendingAuth(value, Date.now()) ? value : null;
+  } catch {
+    return null;
+  }
 }
 
 async function claimCodeRequest(tx: PoolClient, userId: number) {
@@ -216,28 +445,82 @@ async function claimCodeRequest(tx: PoolClient, userId: number) {
     });
 }
 
+function authFailureReason(error: unknown): string {
+  const problem = error as { errorMessage?: unknown; code?: unknown } | null;
+  const rpcCodes = new Set([
+    "API_ID_INVALID",
+    "API_ID_PUBLISHED_FLOOD",
+    "APP_VERSION_OUTDATED",
+    "UPDATE_APP_TO_LOGIN",
+    "PHONE_NUMBER_INVALID",
+    "PHONE_NUMBER_BANNED",
+    "PHONE_NUMBER_FLOOD",
+    "PHONE_PASSWORD_FLOOD",
+    "PHONE_PASSWORD_PROTECTED",
+    "PHONE_NUMBER_APP_SIGNUP_FORBIDDEN",
+    "SMS_CODE_CREATE_FAILED",
+    "AUTH_RESTART",
+  ]);
+  if (typeof problem?.errorMessage === "string") {
+    if (rpcCodes.has(problem.errorMessage)) return problem.errorMessage;
+    if (/^FLOOD_WAIT(?:_\d+)?$/.test(problem.errorMessage)) return "FLOOD_WAIT";
+  }
+  const networkCodes = new Set([
+    "ETIMEDOUT",
+    "ECONNRESET",
+    "ECONNREFUSED",
+    "EHOSTUNREACH",
+    "ENETUNREACH",
+    "EAI_AGAIN",
+    "ENOTFOUND",
+  ]);
+  if (typeof problem?.code === "string" && networkCodes.has(problem.code))
+    return problem.code;
+  if (error instanceof TRPCError && error.code === "TIMEOUT") return "TIMEOUT";
+  if (
+    error instanceof Error &&
+    error.message === "Request was unsuccessful 1 time(s)"
+  )
+    return "SDK_RETRY_EXHAUSTED";
+  return "UNKNOWN";
+}
+
 export async function sendPhoneCode(
   userId: number,
-  phone: string
-): Promise<{ phoneCodeHash: string }> {
+  phone: string,
+  resend = false
+): Promise<{ phoneCodeHash: string; reused?: true }> {
   const normalizedPhone = normalizeLoginPhone(phone);
   if (normalizedPhone === null)
     throw new TRPCError({ code: "BAD_REQUEST", message: LOGIN_PHONE_ERROR });
   return serializedAuth(userId, async tx => {
     const credentials = getApiCredentials();
-    await claimCodeRequest(tx, userId);
-    await disposePending(tx, userId);
+    if (!resend) {
+      const pending = await pendingForResume(tx, userId);
+      if (pending?.phone === normalizedPhone)
+        return { phoneCodeHash: pending.phoneCodeHash, reused: true };
+    }
+    await assertCodeRequestAllowed(tx, userId);
     const { client, session } = await createClient();
+    let codeRequested = false;
     try {
       const result = await bounded(client, async ensureActive => {
         await client.connect();
         ensureActive();
-        return client.invoke(
+        await claimCodeRequest(tx, userId);
+        ensureActive();
+        await disposePending(tx, userId);
+        ensureActive();
+        codeRequested = true;
+        return sendCodeFollowingRedirect(
+          client,
+          session,
           new Api.auth.SendCode({
             phoneNumber: normalizedPhone,
             ...credentials,
             settings: new Api.CodeSettings({}),
-          })
+          }),
+          ensureActive
         );
       });
       const phoneCodeHash = (result as Api.auth.SentCode).phoneCodeHash;
@@ -249,6 +532,8 @@ export async function sendPhoneCode(
         expiresAt: Date.now() + AUTH_TTL_MS,
         attempts: 0,
         needsPassword: false,
+        delivery: codeDelivery(result as Api.auth.SentCode),
+        codeLength: codeLength(result as Api.auth.SentCode),
       };
       await tx.query(
         `INSERT INTO mtproto_pending_auth(user_id,payload_encrypted,expires_at)
@@ -261,7 +546,14 @@ export async function sendPhoneCode(
       );
       return { phoneCodeHash };
     } catch (error) {
-      await disposePending(tx, userId);
+      console.warn(
+        JSON.stringify({
+          event: "telegram_auth_failure",
+          stage: codeRequested ? "request_code" : "connect",
+          reason: authFailureReason(error),
+        })
+      );
+      if (codeRequested) await disposePending(tx, userId);
       throw await errorForAuth(tx, userId, error);
     } finally {
       await destroyClient(client);
@@ -309,21 +601,7 @@ async function requirePending(
   } catch {
     /* Invalid ciphertext or an old key must not expose raw credentials. */
   }
-  if (
-    !state ||
-    typeof state.sessionString !== "string" ||
-    !state.sessionString ||
-    typeof state.phoneCodeHash !== "string" ||
-    !state.phoneCodeHash ||
-    typeof state.phone !== "string" ||
-    !/^\+[1-9]\d{6,14}$/.test(state.phone) ||
-    !Number.isFinite(state.expiresAt) ||
-    state.expiresAt <= Date.now() ||
-    !Number.isInteger(state.attempts) ||
-    state.attempts < 0 ||
-    state.attempts >= 5 ||
-    typeof state.needsPassword !== "boolean"
-  ) {
+  if (!validPendingAuth(state, Date.now())) {
     await disposePending(tx, userId);
     throw expiredAuth();
   }

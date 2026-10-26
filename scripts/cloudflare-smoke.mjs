@@ -337,9 +337,26 @@ async function run() {
     return payload.result.data.json;
   }
   check("anonymous_auth_me", (await rpc("auth.me")) === null);
+  const anonymousAuthStatus = await fetch(
+    `${base}/api/trpc/mtproto.getAuthStatus`,
+    { signal: signal() }
+  );
+  await anonymousAuthStatus.arrayBuffer();
+  check("anonymous_auth_status_denied", anonymousAuthStatus.status === 401);
   check(
     "owner_login",
     (await rpc("auth.login", { password }, true)).success === true
+  );
+  const authStatus = await rpc("mtproto.getAuthStatus");
+  check(
+    "auth_status_is_private_and_readable",
+    authStatus.pending === null &&
+      authStatus.retryAt === null &&
+      authStatus.attemptsRemaining === 3 &&
+      Math.abs(Date.parse(authStatus.serverNow) - Date.now()) < 30_000 &&
+      !/phoneCodeHash|sessionString|payload_encrypted/.test(
+        JSON.stringify(authStatus)
+      )
   );
   const parallel = await Promise.all(
     Array.from({ length: 5 }, () => rpc("auth.me"))
