@@ -185,6 +185,15 @@ const UPLOAD_DIAGNOSTIC_NAMES = new Set([
   "FileMigrateError",
   "FloodWaitError",
 ]);
+const UPLOAD_DIAGNOSTIC_FIXED_MESSAGES = new Map([
+  ["Maximum reconnection retries reached. Aborting!", "RECONNECT_EXHAUSTED"],
+  ["NetSocket was closed", "SOCKET_CLOSED"],
+  ["Not connected", "TRANSPORT_DISCONNECTED"],
+  ["Auth key unset", "AUTH_KEY_UNSET"],
+  ["Auth key not set", "AUTH_KEY_UNSET"],
+  ["Unset AuthKey", "AUTH_KEY_UNSET"],
+  ["Not a valid string", "INVALID_SESSION_FORMAT"],
+]);
 
 /** Fixed metadata only: raw exceptions may contain request bytes and credentials. */
 export function photoUploadFailureDiagnostic(error: unknown) {
@@ -217,6 +226,16 @@ export function photoUploadFailureDiagnostic(error: unknown) {
       error.message === "Request was unsuccessful 1 time(s)"
     )
       reason = "SDK_RETRY_EXHAUSTED";
+    if (reason === "UNKNOWN") {
+      const fixedMessage =
+        typeof error === "string"
+          ? error
+          : error instanceof Error
+            ? error.message
+            : undefined;
+      if (fixedMessage !== undefined)
+        reason = UPLOAD_DIAGNOSTIC_FIXED_MESSAGES.get(fixedMessage) ?? reason;
+    }
     if (
       typeof problem?.name === "string" &&
       UPLOAD_DIAGNOSTIC_NAMES.has(problem.name)

@@ -77,6 +77,15 @@ describe("safe photo-upload diagnostics", () => {
       "SDK_RETRY_EXHAUSTED",
       "Error",
     ],
+    [
+      "Maximum reconnection retries reached. Aborting!",
+      "RECONNECT_EXHAUSTED",
+      "UNKNOWN",
+    ],
+    [new Error("NetSocket was closed"), "SOCKET_CLOSED", "Error"],
+    [new Error("Not connected"), "TRANSPORT_DISCONNECTED", "Error"],
+    [new Error("Auth key unset"), "AUTH_KEY_UNSET", "Error"],
+    [new Error("Not a valid string"), "INVALID_SESSION_FORMAT", "Error"],
   ])("returns only allowlisted metadata", (error, reason, name) => {
     expect(photoUploadFailureDiagnostic(error)).toEqual({
       event: "telegram_media_failure",
@@ -104,6 +113,15 @@ describe("safe photo-upload diagnostics", () => {
       reason: "UNKNOWN",
       name: "UNKNOWN",
     });
+    expect(JSON.stringify(diagnostic)).not.toContain(secret);
+  });
+
+  it("does not accept a fixed string with appended private information", () => {
+    const secret = "synthetic-private-session-value";
+    const diagnostic = photoUploadFailureDiagnostic(
+      `Maximum reconnection retries reached. Aborting! ${secret}`
+    );
+    expect(diagnostic.reason).toBe("UNKNOWN");
     expect(JSON.stringify(diagnostic)).not.toContain(secret);
   });
 
