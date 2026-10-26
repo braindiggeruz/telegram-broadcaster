@@ -28,10 +28,22 @@ let checked = 0;
 
 class SmokeError extends Error {}
 
-function check(name, passed) {
-  if (!passed) throw new SmokeError(name);
+function check(name, passed, counts) {
+  if (!passed) {
+    if (counts) console.error(JSON.stringify({ check: name, counts }));
+    throw new SmokeError(name);
+  }
   checked++;
   console.log(JSON.stringify({ check: name, pass: true }));
+}
+
+function progressCounts(progress) {
+  // Only allow numeric counters into diagnostics, never recipients or messages.
+  return Object.fromEntries(
+    ["dryRun", "pending", "accepted", "failed", "unknown", "suppressed"].map(
+      name => [name, Number.isFinite(progress[name]) ? progress[name] : null]
+    )
+  );
 }
 
 function launch(args, env) {
@@ -212,6 +224,20 @@ async function run() {
     assets: {
       ...parsed.config.assets,
       directory: resolve(root, "dist/public"),
+      // Wrangler's local scheduled middleware runs inside the user Worker.
+      // Otherwise the production assets-first router serves SPA HTML here.
+      // Add the test route only to this temporary config, never to production.
+      run_worker_first:
+        parsed.config.assets?.run_worker_first === true
+          ? true
+          : [
+              ...new Set([
+                ...(Array.isArray(parsed.config.assets?.run_worker_first)
+                  ? parsed.config.assets.run_worker_first
+                  : []),
+                "/__scheduled",
+              ]),
+            ],
     },
     vars: {
       ...parsed.config.vars,
@@ -369,21 +395,30 @@ async function run() {
       `${base}/__scheduled?cron=${encodeURIComponent("* * * * *")}`,
       { signal: signal(65_000) }
     );
-    await response.arrayBuffer();
-    if (!response.ok) throw new SmokeError("cron_invocation_failed");
+    const acknowledged = (await response.text()).trim() === "Ran scheduled event";
+    if (!response.ok || !acknowledged) {
+      console.error(JSON.stringify({
+        check: "cron_dispatch",
+        status: response.status,
+        scheduledAcknowledged: acknowledged,
+      }));
+      throw new SmokeError("cron_invocation_failed");
+    }
   }
   await cron();
   const first = await rpc("broadcast.getProgress", { id: campaign.id });
   check(
     "cron_processed_two_dry_runs",
-    first.dryRun === 2 && first.pending === 0 && first.accepted === 0
+    first.dryRun === 2 && first.pending === 0 && first.accepted === 0,
+    progressCounts(first)
   );
   await Promise.all([cron(), cron()]);
   const final = await rpc("broadcast.getProgress", { id: campaign.id });
   const logs = await rpc("broadcast.getLogs", { id: campaign.id });
   check(
     "concurrent_cron_has_no_duplicates",
-    final.dryRun === 2 && final.accepted === 0 && logs.length === 2
+    final.dryRun === 2 && final.accepted === 0 && logs.length === 2,
+    { ...progressCounts(final), logs: logs.length }
   );
   const ready = await fetch(`${base}/readyz`, { signal: signal() });
   check(
