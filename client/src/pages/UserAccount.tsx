@@ -212,6 +212,7 @@ export default function UserAccount() {
     onError: e => {
       if (e.message === "TWO_FACTOR_REQUIRED") {
         toast.info("Требуется пароль двухфакторной аутентификации");
+        setCode("");
         setStep("password");
       } else {
         toast.error(`Ошибка: ${e.message}`);
