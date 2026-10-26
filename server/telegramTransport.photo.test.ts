@@ -256,6 +256,37 @@ describe("account photo transport", () => {
     expect(mocks.invoke).toHaveBeenCalledTimes(1);
   });
 
+  it("logs upload failure metadata without retaining private exception contents", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const secret = "synthetic-private-upload-session-value";
+    try {
+      mocks.invoke.mockRejectedValueOnce(
+        Object.assign(new Error(secret), {
+          name: secret,
+          code: secret,
+          errorMessage: secret,
+          stack: secret,
+        })
+      );
+      await expect(telegramTransport.send(request())).rejects.toMatchObject({
+        category: "transient",
+        code: "PHOTO_UPLOAD_UNAVAILABLE",
+      });
+      expect(warning).toHaveBeenCalledWith(
+        JSON.stringify({
+          event: "telegram_media_failure",
+          stage: "upload_part",
+          reason: "UNKNOWN",
+          name: "UNKNOWN",
+        })
+      );
+      expect(JSON.stringify(warning.mock.calls)).not.toContain(secret);
+      expect(mocks.invoke).toHaveBeenCalledTimes(1);
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
   it("never sends after an unaccepted upload part", async () => {
     mocks.invoke.mockResolvedValueOnce(false);
     await expect(telegramTransport.send(request())).rejects.toMatchObject({

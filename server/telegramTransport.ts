@@ -129,6 +129,110 @@ export function classifyMtprotoError(error: unknown): DeliveryError | Error {
     return new DeliveryError("content", code);
   return new Error("MTPROTO_RESULT_UNKNOWN");
 }
+
+const UPLOAD_DIAGNOSTIC_RPC_CODES = new Set([
+  "FILE_PART_EMPTY",
+  "FILE_PART_INVALID",
+  "FILE_PART_SIZE_INVALID",
+  "FILE_PART_TOO_BIG",
+  "FILE_PARTS_INVALID",
+  "FILE_ID_INVALID",
+  "MSG_ID_INVALID",
+  "AUTH_KEY_UNREGISTERED",
+  "AUTH_KEY_DUPLICATED",
+  "SESSION_REVOKED",
+  "SESSION_EXPIRED",
+  "USER_DEACTIVATED",
+  "USER_DEACTIVATED_BAN",
+  "FROZEN_METHOD_INVALID",
+  "PEER_FLOOD",
+  "RPC_CALL_FAIL",
+  "RPC_MCGET_FAIL",
+  "CONNECTION_NOT_INITED",
+  "CONNECTION_LAYER_INVALID",
+  "INPUT_LAYER_INVALID",
+  "METHOD_INVALID",
+]);
+const UPLOAD_DIAGNOSTIC_SYSTEM_CODES = new Set([
+  "ETIMEDOUT",
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EPIPE",
+  "ERR_INVALID_ARG_TYPE",
+  "ERR_OUT_OF_RANGE",
+  "ERR_NOT_IMPLEMENTED",
+  "ERR_METHOD_NOT_IMPLEMENTED",
+  "ERR_STREAM_PREMATURE_CLOSE",
+  "ERR_STREAM_DESTROYED",
+  "ERR_SOCKET_CLOSED",
+]);
+const UPLOAD_DIAGNOSTIC_NAMES = new Set([
+  "Error",
+  "TypeError",
+  "RangeError",
+  "CastError",
+  "RPCError",
+  "BadRequestError",
+  "UnauthorizedError",
+  "ForbiddenError",
+  "AuthKeyError",
+  "ServerError",
+  "TimedOutError",
+  "FileMigrateError",
+  "FloodWaitError",
+]);
+
+/** Fixed metadata only: raw exceptions may contain request bytes and credentials. */
+export function photoUploadFailureDiagnostic(error: unknown) {
+  let reason = "UNKNOWN";
+  let name = "UNKNOWN";
+  try {
+    const problem = error as {
+      errorMessage?: unknown;
+      code?: unknown;
+      name?: unknown;
+    } | null;
+    const rpc = problem?.errorMessage;
+    if (typeof rpc === "string") {
+      if (UPLOAD_DIAGNOSTIC_RPC_CODES.has(rpc)) reason = rpc;
+      else if (/^FLOOD_(?:PREMIUM_)?WAIT(?:_\d+)?$/.test(rpc))
+        reason = "FLOOD_WAIT";
+      else if (/^FILE_MIGRATE_\d+$/.test(rpc)) reason = "FILE_MIGRATE";
+      else if (/^FILE_PART_\d+_MISSING$/.test(rpc))
+        reason = "FILE_PART_MISSING";
+    }
+    if (
+      reason === "UNKNOWN" &&
+      typeof problem?.code === "string" &&
+      UPLOAD_DIAGNOSTIC_SYSTEM_CODES.has(problem.code)
+    )
+      reason = problem.code;
+    if (
+      reason === "UNKNOWN" &&
+      error instanceof Error &&
+      error.message === "Request was unsuccessful 1 time(s)"
+    )
+      reason = "SDK_RETRY_EXHAUSTED";
+    if (
+      typeof problem?.name === "string" &&
+      UPLOAD_DIAGNOSTIC_NAMES.has(problem.name)
+    )
+      name = problem.name;
+  } catch {
+    // Malformed metadata/getters must not make error reporting throw.
+  }
+  return {
+    event: "telegram_media_failure",
+    stage: "upload_part",
+    reason,
+    name,
+  } as const;
+}
+
 async function sendBot(request: DeliveryRequest) {
   if (request.photoId || request.photoSha256)
     throw new DeliveryError("content", "BOT_PHOTO_UNSUPPORTED");
@@ -230,6 +334,7 @@ async function uploadPhoto(
       );
     } catch (error) {
       ensureActive();
+      console.warn(JSON.stringify(photoUploadFailureDiagnostic(error)));
       const classified = classifyMtprotoError(error);
       if (classified instanceof DeliveryError) throw classified;
       // No messages.SendMedia has been issued, so this failure is safe to retry.
