@@ -1,6 +1,6 @@
 # TG Sender на Cloudflare Workers
 
-Состояние на 26 октября 2026 года: **сервис опубликован, 19/19 проверок публичного HTTPS endpoint прошли успешно**. Рабочий адрес: [tg-sender-v2.braindigger-uz.workers.dev](https://tg-sender-v2.braindigger-uz.workers.dev). Проверены вход владельца с прежним паролем, доступ к БД, естественный минутный Cron и две сухие доставки без дублей. Версия Worker: `1fc0408e-ef17-44b1-bf5e-570d367234bc`; проверка выполнена в 13:15 UTC. `LIVE_SEND_ENABLED=false`: реальных отправок Telegram при приёмке не было. Первый зашифрованный облачный архив проверен; автоматический GitHub backup по расписанию пока не активирован.
+Состояние на 26 октября 2026 года: **сервис опубликован, 19/19 проверок публичного HTTPS endpoint прошли успешно**. Рабочий адрес: [tg-sender-v2.braindigger-uz.workers.dev](https://tg-sender-v2.braindigger-uz.workers.dev). Проверены вход владельца с прежним паролем, доступ к БД, естественный минутный Cron и две сухие доставки без дублей. Версия Worker: `1fc0408e-ef17-44b1-bf5e-570d367234bc`; проверка выполнена в 13:15 UTC. `LIVE_SEND_ENABLED=false`: реальных отправок Telegram при приёмке не было. Ежедневный GitHub backup активирован на default branch `main`, в 02:17 UTC (07:17 Asia/Karachi). [Первый ручной запуск](https://github.com/braindiggeruz/telegram-broadcaster/actions/runs/40331305377) успешно выполнил шифрование, пробное восстановление, загрузку и сверку SHA-256; результат повторно проверен в БД и закрытом Storage в 13:34 UTC. Будущий плановый запуск ещё не наблюдался.
 
 ## Архитектура и бюджет
 
@@ -82,7 +82,7 @@ Wrangler закреплён на `4.152.0`. `scripts/build-cloudflare.mjs` за�
 
 Workflow `.github/workflows/cloud-backup.yml` подготовлен на **02:17 UTC ежедневно**, также есть `workflow_dispatch`. Он выполняет `pg_dump` PostgreSQL 17, шифрует архив, восстанавливает его в одноразовую локальную PostgreSQL на runner, отправляет в **приватный** bucket `tg-sender-backups` и сверяет скачанные байты по SHA-256. После успешной сверки сохраняются семь последних архивов; удаляются только архивы с именами этого приложения. Максимальный размер одного архива — 48 MiB. Превышение лимита завершает задачу ошибкой, не создаёт платное хранилище.
 
-**Первый облачный архив создан и проверен, но автоматический workflow пока не активирован.** Приватный bucket уже проверен. Для запуска из GitHub Actions нужны repository variable `CLOUD_BACKUPS_ENABLED=true` и GitHub Secrets:
+**Workflow активен на default branch `main`, `CLOUD_BACKUPS_ENABLED=true`; первый ручной запуск завершился успешно.** Runtime readback подтверждает `cloud_archive=SUCCEEDED`, `last_rehearsal_at` и отсутствие ошибки. Архив 90 287 байт проверен в закрытом Storage и сохранён в приватной локальной папке вне Supabase. Для GitHub Actions настроены Secrets:
 
 - `CLOUD_DATABASE_URL`, при необходимости `CLOUD_DATABASE_CA`;
 - `CLOUD_BACKUP_KEY_BASE64`, `CLOUD_ENCRYPTION_KEY`;
