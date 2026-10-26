@@ -1,10 +1,19 @@
 import { createRequire } from "node:module";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { homedir } from "node:os";
 const require = createRequire(import.meta.url);
-const {
-  chromium,
-} = require("C:/Users/Borinio/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright");
+let playwright;
+try {
+  playwright = require(process.env.PLAYWRIGHT_PACKAGE_PATH || "playwright");
+} catch {
+  const bundled = path.join(
+    homedir(),
+    ".cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright"
+  );
+  playwright = require(bundled);
+}
+const { chromium } = playwright;
 const root = process.cwd();
 const runtime = path.join(root, ".runtime");
 const screenshotDir = path.join(runtime, "screenshots");
