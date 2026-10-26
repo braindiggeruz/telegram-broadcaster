@@ -7,6 +7,7 @@ import type { PoolClient } from "pg";
 import { getPool } from "./connection";
 import { getMtprotoSession } from "./db";
 import { decryptSecret, encryptSecret } from "./security/secrets";
+import { LOGIN_PHONE_ERROR, normalizeLoginPhone } from "../shared/loginPhone";
 
 export interface MtprotoClientInfo {
   client: TelegramClient;
@@ -219,12 +220,10 @@ export async function sendPhoneCode(
   userId: number,
   phone: string
 ): Promise<{ phoneCodeHash: string }> {
+  const normalizedPhone = normalizeLoginPhone(phone);
+  if (normalizedPhone === null)
+    throw new TRPCError({ code: "BAD_REQUEST", message: LOGIN_PHONE_ERROR });
   return serializedAuth(userId, async tx => {
-    if (!/^\+[1-9]\d{6,14}$/.test(phone))
-      throw new TRPCError({
-        code: "BAD_REQUEST",
-        message: "Номер должен быть в международном формате +998…",
-      });
     const credentials = getApiCredentials();
     await claimCodeRequest(tx, userId);
     await disposePending(tx, userId);
@@ -235,7 +234,7 @@ export async function sendPhoneCode(
         ensureActive();
         return client.invoke(
           new Api.auth.SendCode({
-            phoneNumber: phone,
+            phoneNumber: normalizedPhone,
             ...credentials,
             settings: new Api.CodeSettings({}),
           })
@@ -245,7 +244,7 @@ export async function sendPhoneCode(
       if (!phoneCodeHash) throw new Error("UNEXPECTED_AUTH_RESULT");
       const state: PendingAuth = {
         phoneCodeHash,
-        phone,
+        phone: normalizedPhone,
         sessionString: session.save() as unknown as string,
         expiresAt: Date.now() + AUTH_TTL_MS,
         attempts: 0,

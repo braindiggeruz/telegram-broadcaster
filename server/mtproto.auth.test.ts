@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { decryptSecret } from "./security/secrets";
+import { LOGIN_PHONE_ERROR } from "../shared/loginPhone";
 
 const mocks = vi.hoisted(() => ({
   clients: [] as any[],
@@ -150,6 +151,47 @@ afterEach(() => {
 });
 
 describe("request-scoped MTProto authentication", () => {
+  it("sends and persists a formatted international phone canonically", async () => {
+    await expect(
+      sendPhoneCode(114, " +998\u00a0(90) 000-00.00 ")
+    ).resolves.toEqual({ phoneCodeHash: "synthetic-code-hash" });
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "SendCode",
+        phoneNumber: "+998900000000",
+      })
+    );
+    const pending = JSON.parse(
+      decryptSecret(
+        mocks.records.get(114)!.payload_encrypted,
+        "mtproto-auth:114"
+      )
+    );
+    expect(pending.phone).toBe("+998900000000");
+    await signInWithCode(114, "12345");
+    expect(mocks.invoke).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        kind: "SignIn",
+        phoneNumber: "+998900000000",
+        phoneCodeHash: "synthetic-code-hash",
+      })
+    );
+  });
+
+  it.each(["998900000000", "+998900000000 ext 1", "+998+900000000"])(
+    "rejects an invalid phone before locks, throttles or Telegram: %s",
+    async phone => {
+      await expect(sendPhoneCode(115, phone)).rejects.toMatchObject({
+        code: "BAD_REQUEST",
+        message: LOGIN_PHONE_ERROR,
+      });
+      expect(mocks.txQuery).not.toHaveBeenCalled();
+      expect(mocks.clients).toHaveLength(0);
+      expect(mocks.invoke).not.toHaveBeenCalled();
+      expect(mocks.records.size).toBe(0);
+    }
+  );
+
   it("requires operator credentials and disables hidden retries/logging", async () => {
     vi.stubEnv("TELEGRAM_API_ID", "");
     expect(() => getApiCredentials()).toThrow(/TELEGRAM_API_ID/);

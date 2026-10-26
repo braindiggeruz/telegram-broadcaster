@@ -30,7 +30,7 @@ type Mapping = {
   skipHeader: boolean;
 };
 const headerPattern =
-  /^(phone|телефон|номер|chat.?id|telegram.?id|username|user.?name|получатель|recipient)$/i;
+  /^(phone(?:[\s_-]*(?:number|no))?|телефон(?:ы)?|номер(?:а)?(?:\s+телефон(?:а|ов)?)?|chat.?id|telegram.?id|username|user.?name|получатель|recipient)$/i;
 const emptyMapping: Mapping = {
   sheet: 0,
   column: 0,
@@ -98,6 +98,15 @@ export default function Recipients() {
     50,
     rows.reduce((max, row) => Math.max(max, row.length), 0)
   );
+  const hasPhones = result.valid.some(item => item.type === "phone");
+  const sourceValid = source.trim().length >= 3;
+  const saveHint = !result.valid.length
+    ? "Нет получателей для сохранения. Проверьте колонку и тип данных."
+    : !sourceValid
+      ? "Чтобы сохранить список, укажите источник разрешения на сообщения — минимум 3 символа."
+      : !consent
+        ? "Подтвердите согласие получателей для выбранного отправителя."
+        : "";
 
   async function readFile(file: File) {
     setBusy(true);
@@ -190,6 +199,16 @@ export default function Recipients() {
       setMapping(suggested);
       setMappingKey(cacheKey);
       setSource("");
+      // Choose a usable initial sender before the owner confirms any consent.
+      if (
+        previewRecipients(
+          parsed[suggested.sheet].rows,
+          suggested.column,
+          suggested.type,
+          suggested.skipHeader
+        ).valid.some(item => item.type === "phone")
+      )
+        setPermissionTransport("mtproto");
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Не удалось прочитать файл"
@@ -393,15 +412,46 @@ export default function Recipients() {
                   </option>
                 </select>
               </label>
+              {hasPhones && permissionTransport === "bot" && (
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 space-y-2 text-sm">
+                  <p>
+                    В списке есть телефоны. Бот не может отправлять сообщения по
+                    номеру телефона — для этого нужен личный аккаунт.
+                  </p>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      setPermissionTransport("mtproto");
+                      setConsent(false);
+                    }}
+                  >
+                    Выбрать личный аккаунт
+                  </Button>
+                </div>
+              )}
               <label htmlFor="consent-source" className="text-sm font-medium">
-                Источник разрешения на сообщения
+                Источник разрешения на сообщения · обязательно
               </label>
               <Input
                 id="consent-source"
                 placeholder="Например: подписка через бота, форма согласия в CRM"
                 value={source}
+                required
+                minLength={3}
+                maxLength={256}
+                aria-describedby="consent-source-help"
+                aria-invalid={source.length > 0 && !sourceValid}
                 onChange={e => setSource(e.target.value)}
               />
+              <p
+                id="consent-source-help"
+                className="text-xs text-muted-foreground"
+              >
+                Укажите, где эти получатели разрешили сообщения от выбранного
+                отправителя. Поставленная галочка не заменяет источник.
+              </p>
               <label className="flex items-start gap-3 text-sm">
                 <input
                   type="checkbox"
@@ -422,9 +472,10 @@ export default function Recipients() {
             </div>
             <Button
               className="w-full"
+              aria-describedby={saveHint ? "audience-save-hint" : undefined}
               disabled={
                 !result.valid.length ||
-                source.trim().length < 3 ||
+                !sourceValid ||
                 !consent ||
                 upload.isPending
               }
@@ -447,6 +498,16 @@ export default function Recipients() {
               )}
               Сохранить {result.valid.length} получателей
             </Button>
+            {saveHint && (
+              <p
+                id="audience-save-hint"
+                role="status"
+                aria-live="polite"
+                className="text-sm text-amber-400"
+              >
+                {saveHint}
+              </p>
+            )}
           </>
         )}
         <input

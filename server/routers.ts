@@ -9,6 +9,7 @@ import { getPool } from "./connection";
 import * as delivery from "./delivery";
 import type { SenderKind } from "./delivery";
 import { normalizeRecipient, parseRecipientCsv } from "../shared/recipients";
+import { LOGIN_PHONE_ERROR, normalizeLoginPhone } from "../shared/loginPhone";
 import { createCampaign, launchCampaign, enrichedCampaign } from "./campaigns";
 import { draftRouter } from "./drafts";
 import { mediaRouter } from "./media";
@@ -318,7 +319,19 @@ const mtprotoRouter = router({
     mtprotoSessionDto(await db.getMtprotoSession(ctx.user.id))
   ),
   sendCode: protectedProcedure
-    .input(z.object({ phone: z.string().regex(/^\+[1-9]\d{6,14}$/) }))
+    .input(
+      z.object({
+        phone: z
+          .string()
+          .max(64, LOGIN_PHONE_ERROR)
+          .transform((value, ctx) => {
+            const phone = normalizeLoginPhone(value);
+            if (phone !== null) return phone;
+            ctx.addIssue({ code: "custom", message: LOGIN_PHONE_ERROR });
+            return z.NEVER;
+          }),
+      })
+    )
     .mutation(async ({ ctx, input }) => {
       await sendPhoneCode(ctx.user.id, input.phone);
       return { sent: true };
