@@ -2,13 +2,28 @@ import { useState } from "react";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+} from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
 import {
-  User, Phone, Shield, LogOut, CheckCircle2, XCircle,
-  Loader2, MessageSquare, Lock, AlertTriangle, Info,
+  User,
+  Phone,
+  Shield,
+  LogOut,
+  CheckCircle2,
+  XCircle,
+  Loader2,
+  MessageSquare,
+  Lock,
+  AlertTriangle,
+  Info,
 } from "lucide-react";
 
 type AuthStep = "idle" | "phone" | "code" | "password" | "done";
@@ -27,16 +42,18 @@ export default function UserAccount() {
       toast.success("Код отправлен на ваш Telegram!");
       setStep("code");
     },
-    onError: (e) => toast.error(`Ошибка: ${e.message}`),
+    onError: e => toast.error(`Ошибка: ${e.message}`),
   });
 
   const signInMutation = trpc.mtproto.signIn.useMutation({
     onSuccess: () => {
       toast.success("Аккаунт успешно подключён!");
       setStep("done");
+      setCode("");
+      setPassword("");
       utils.mtproto.getSession.invalidate();
     },
-    onError: (e) => {
+    onError: e => {
       if (e.message === "TWO_FACTOR_REQUIRED") {
         toast.info("Требуется пароль двухфакторной аутентификации");
         setStep("password");
@@ -50,9 +67,11 @@ export default function UserAccount() {
     onSuccess: () => {
       toast.success("Аккаунт успешно подключён!");
       setStep("done");
+      setCode("");
+      setPassword("");
       utils.mtproto.getSession.invalidate();
     },
-    onError: (e) => toast.error(`Ошибка: ${e.message}`),
+    onError: e => toast.error(`Ошибка: ${e.message}`),
   });
 
   const logoutMutation = trpc.mtproto.logout.useMutation({
@@ -64,16 +83,16 @@ export default function UserAccount() {
       setPassword("");
       utils.mtproto.getSession.invalidate();
     },
-    onError: (e) => toast.error(`Ошибка: ${e.message}`),
+    onError: e => toast.error(`Ошибка: ${e.message}`),
   });
 
   const isConnected = session?.isActive;
 
   return (
-    <div className="max-w-2xl mx-auto space-y-6">
+    <div className="p-5 lg:p-8 max-w-2xl mx-auto space-y-6">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-foreground">User Account</h1>
+        <h1 className="text-2xl font-bold text-foreground">Личный аккаунт</h1>
         <p className="text-muted-foreground mt-1">
           Подключите личный Telegram-аккаунт для рассылки через MTProto
         </p>
@@ -85,9 +104,9 @@ export default function UserAccount() {
         <div className="text-sm text-amber-300 space-y-1">
           <p className="font-semibold">Важные ограничения Telegram</p>
           <p className="text-amber-400/80">
-            Рассылка через личный аккаунт может привести к временной блокировке при агрессивном использовании.
-            Рекомендуется задержка 3–5 секунд и не более 50 новых контактов в день. Используйте только для
-            аудитории, которая знакома с вами.
+            Отправляйте сообщения только ожидающей их аудитории. Диспетчер
+            соблюдает паузы Telegram, но задержка не гарантирует отсутствие
+            ограничений. Используйте для аудитории, которая знакома с вами.
           </p>
         </div>
       </div>
@@ -107,7 +126,10 @@ export default function UserAccount() {
                 <CheckCircle2 className="h-3 w-3 mr-1" /> Подключён
               </Badge>
             ) : (
-              <Badge variant="outline" className="text-muted-foreground border-border">
+              <Badge
+                variant="outline"
+                className="text-muted-foreground border-border"
+              >
                 <XCircle className="h-3 w-3 mr-1" /> Не подключён
               </Badge>
             )}
@@ -120,24 +142,38 @@ export default function UserAccount() {
             <CardContent className="pt-4 space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1">
-                  <p className="text-xs text-muted-foreground uppercase tracking-wider">Имя</p>
+                  <p className="text-xs text-muted-foreground uppercase tracking-wider">
+                    Имя
+                  </p>
                   <p className="text-sm font-medium text-foreground">
-                    {[session.firstName, session.lastName].filter(Boolean).join(" ") || "—"}
+                    {[session.firstName, session.lastName]
+                      .filter(Boolean)
+                      .join(" ") || "—"}
                   </p>
                 </div>
                 <div className="space-y-1">
-                  <p className="text-xs text-muted-foreground uppercase tracking-wider">Username</p>
+                  <p className="text-xs text-muted-foreground uppercase tracking-wider">
+                    Username
+                  </p>
                   <p className="text-sm font-medium text-foreground">
                     {session.username ? `@${session.username}` : "—"}
                   </p>
                 </div>
                 <div className="space-y-1">
-                  <p className="text-xs text-muted-foreground uppercase tracking-wider">Телефон</p>
-                  <p className="text-sm font-medium text-foreground">{session.phone || "—"}</p>
+                  <p className="text-xs text-muted-foreground uppercase tracking-wider">
+                    Телефон
+                  </p>
+                  <p className="text-sm font-medium text-foreground">
+                    {session.phone || "—"}
+                  </p>
                 </div>
                 <div className="space-y-1">
-                  <p className="text-xs text-muted-foreground uppercase tracking-wider">Telegram ID</p>
-                  <p className="text-sm font-mono text-foreground">{session.telegramId || "—"}</p>
+                  <p className="text-xs text-muted-foreground uppercase tracking-wider">
+                    Telegram ID
+                  </p>
+                  <p className="text-sm font-mono text-foreground">
+                    {session.telegramId || "—"}
+                  </p>
                 </div>
               </div>
 
@@ -171,20 +207,36 @@ export default function UserAccount() {
               Подключить аккаунт
             </CardTitle>
             <CardDescription>
-              Введите номер телефона вашего Telegram-аккаунта. Мы отправим код подтверждения.
+              Введите номер телефона вашего Telegram-аккаунта. Мы отправим код
+              подтверждения.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-5">
-
             {/* Step indicator */}
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <StepDot active={step === "idle" || step === "phone"} done={step !== "idle" && step !== "phone"} label="1. Телефон" />
+              <StepDot
+                active={step === "idle" || step === "phone"}
+                done={step !== "idle" && step !== "phone"}
+                label="1. Телефон"
+              />
               <div className="h-px flex-1 bg-border" />
-              <StepDot active={step === "code"} done={step === "done" || step === "password"} label="2. Код" />
+              <StepDot
+                active={step === "code"}
+                done={step === "done" || step === "password"}
+                label="2. Код"
+              />
               <div className="h-px flex-1 bg-border" />
-              <StepDot active={step === "password"} done={step === "done"} label="3. Пароль (если 2FA)" />
+              <StepDot
+                active={step === "password"}
+                done={step === "done"}
+                label="3. Пароль (если 2FA)"
+              />
               <div className="h-px flex-1 bg-border" />
-              <StepDot active={step === "done"} done={false} label="4. Готово" />
+              <StepDot
+                active={step === "done"}
+                done={false}
+                label="4. Готово"
+              />
             </div>
 
             {/* Phone step */}
@@ -198,9 +250,13 @@ export default function UserAccount() {
                   <Input
                     placeholder="+79001234567"
                     value={phone}
-                    onChange={(e) => setPhone(e.target.value)}
+                    onChange={e => setPhone(e.target.value)}
                     className="bg-background/50 border-border/60 focus:border-primary/60 font-mono"
-                    onKeyDown={(e) => e.key === "Enter" && phone && sendCodeMutation.mutate({ phone })}
+                    onKeyDown={e =>
+                      e.key === "Enter" &&
+                      phone &&
+                      sendCodeMutation.mutate({ phone })
+                    }
                   />
                   <p className="text-xs text-muted-foreground flex items-center gap-1">
                     <Info className="h-3 w-3" />
@@ -213,9 +269,15 @@ export default function UserAccount() {
                   disabled={!phone || sendCodeMutation.isPending}
                 >
                   {sendCodeMutation.isPending ? (
-                    <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Отправка кода...</>
+                    <>
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" /> Отправка
+                      кода...
+                    </>
                   ) : (
-                    <><MessageSquare className="h-4 w-4 mr-2" /> Получить код в Telegram</>
+                    <>
+                      <MessageSquare className="h-4 w-4 mr-2" /> Получить код в
+                      Telegram
+                    </>
                   )}
                 </Button>
               </div>
@@ -225,7 +287,8 @@ export default function UserAccount() {
             {step === "code" && (
               <div className="space-y-3">
                 <div className="rounded-lg border border-primary/20 bg-primary/5 p-3 text-sm text-primary/80">
-                  Код отправлен в ваш Telegram на номер <span className="font-mono font-semibold">{phone}</span>.
+                  Код отправлен в ваш Telegram на номер{" "}
+                  <span className="font-mono font-semibold">{phone}</span>.
                   Откройте Telegram и скопируйте 5-значный код.
                 </div>
                 <div className="space-y-2">
@@ -236,17 +299,26 @@ export default function UserAccount() {
                   <Input
                     placeholder="12345"
                     value={code}
-                    onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                    onChange={e =>
+                      setCode(e.target.value.replace(/\D/g, "").slice(0, 6))
+                    }
                     className="bg-background/50 border-border/60 focus:border-primary/60 font-mono text-center text-xl tracking-[0.5em]"
                     maxLength={6}
-                    onKeyDown={(e) => e.key === "Enter" && code.length >= 4 && signInMutation.mutate({ code })}
+                    onKeyDown={e =>
+                      e.key === "Enter" &&
+                      code.length >= 4 &&
+                      signInMutation.mutate({ code })
+                    }
                   />
                 </div>
                 <div className="flex gap-2">
                   <Button
                     variant="outline"
                     className="flex-1"
-                    onClick={() => { setStep("phone"); setCode(""); }}
+                    onClick={() => {
+                      setStep("phone");
+                      setCode("");
+                    }}
                   >
                     Назад
                   </Button>
@@ -256,9 +328,14 @@ export default function UserAccount() {
                     disabled={code.length < 4 || signInMutation.isPending}
                   >
                     {signInMutation.isPending ? (
-                      <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Проверка...</>
+                      <>
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />{" "}
+                        Проверка...
+                      </>
                     ) : (
-                      <><CheckCircle2 className="h-4 w-4 mr-2" /> Подтвердить</>
+                      <>
+                        <CheckCircle2 className="h-4 w-4 mr-2" /> Подтвердить
+                      </>
                     )}
                   </Button>
                 </div>
@@ -278,7 +355,8 @@ export default function UserAccount() {
             {step === "password" && (
               <div className="space-y-3">
                 <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 text-sm text-amber-400/80">
-                  На вашем аккаунте включена двухфакторная аутентификация. Введите облачный пароль Telegram.
+                  На вашем аккаунте включена двухфакторная аутентификация.
+                  Введите облачный пароль Telegram.
                 </div>
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-foreground flex items-center gap-2">
@@ -289,9 +367,13 @@ export default function UserAccount() {
                     type="password"
                     placeholder="Ваш пароль Telegram"
                     value={password}
-                    onChange={(e) => setPassword(e.target.value)}
+                    onChange={e => setPassword(e.target.value)}
                     className="bg-background/50 border-border/60 focus:border-primary/60"
-                    onKeyDown={(e) => e.key === "Enter" && password && signInPasswordMutation.mutate({ password })}
+                    onKeyDown={e =>
+                      e.key === "Enter" &&
+                      password &&
+                      signInPasswordMutation.mutate({ password })
+                    }
                   />
                 </div>
                 <Button
@@ -300,9 +382,14 @@ export default function UserAccount() {
                   disabled={!password || signInPasswordMutation.isPending}
                 >
                   {signInPasswordMutation.isPending ? (
-                    <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Проверка...</>
+                    <>
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />{" "}
+                      Проверка...
+                    </>
                   ) : (
-                    <><Lock className="h-4 w-4 mr-2" /> Войти</>
+                    <>
+                      <Lock className="h-4 w-4 mr-2" /> Войти
+                    </>
                   )}
                 </Button>
               </div>
@@ -312,8 +399,12 @@ export default function UserAccount() {
             {step === "done" && (
               <div className="text-center py-4 space-y-2">
                 <CheckCircle2 className="h-12 w-12 text-emerald-400 mx-auto" />
-                <p className="text-foreground font-medium">Аккаунт подключён!</p>
-                <p className="text-sm text-muted-foreground">Теперь вы можете запускать рассылки через ваш личный аккаунт.</p>
+                <p className="text-foreground font-medium">
+                  Аккаунт подключён!
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  Теперь вы можете запускать рассылки через ваш личный аккаунт.
+                </p>
               </div>
             )}
           </CardContent>
@@ -326,21 +417,27 @@ export default function UserAccount() {
           <div className="flex gap-3">
             <Info className="h-5 w-5 text-blue-400 shrink-0 mt-0.5" />
             <div className="text-sm text-muted-foreground space-y-2">
-              <p className="font-medium text-foreground">Как работает MTProto рассылка?</p>
+              <p className="font-medium text-foreground">
+                Как работает MTProto рассылка?
+              </p>
               <p>
-                В отличие от Bot API, MTProto позволяет отправлять сообщения от вашего личного
-                аккаунта по списку <span className="text-foreground font-medium">номеров телефонов</span>,
-                @username или Telegram ID. Номера автоматически импортируются в контакты, сообщение
-                отправляется, затем контакт удаляется.
+                В отличие от Bot API, MTProto позволяет отправлять сообщения от
+                вашего личного аккаунта по списку{" "}
+                <span className="text-foreground font-medium">
+                  номеров телефонов
+                </span>
+                , @username или Telegram ID. Номера автоматически импортируются
+                в контакты, сообщение отправляется, затем контакт удаляется.
               </p>
               <p className="text-amber-400/80">
-                Важно: доставка по номеру возможна, только если у номера есть аккаунт Telegram и в его
-                настройках приватности разрешён поиск по номеру. Часть номеров может быть недоступна —
-                это ограничение Telegram, а не приложения.
+                Важно: доставка по номеру возможна, только если у номера есть
+                аккаунт Telegram и в его настройках приватности разрешён поиск
+                по номеру. Часть номеров может быть недоступна — это ограничение
+                Telegram, а не приложения.
               </p>
               <p>
-                Сессия хранится зашифрованно в базе данных. Вам не нужно повторно входить при каждом
-                использовании приложения.
+                Сессия хранится зашифрованно в базе данных. Вам не нужно
+                повторно входить при каждом использовании приложения.
               </p>
             </div>
           </div>
@@ -350,13 +447,25 @@ export default function UserAccount() {
   );
 }
 
-function StepDot({ active, done, label }: { active: boolean; done: boolean; label: string }) {
+function StepDot({
+  active,
+  done,
+  label,
+}: {
+  active: boolean;
+  done: boolean;
+  label: string;
+}) {
   return (
     <div className="flex flex-col items-center gap-1">
-      <div className={`h-2 w-2 rounded-full transition-colors ${
-        done ? "bg-emerald-500" : active ? "bg-primary" : "bg-border"
-      }`} />
-      <span className={`text-[10px] whitespace-nowrap ${active ? "text-primary" : done ? "text-emerald-400" : "text-muted-foreground"}`}>
+      <div
+        className={`h-2 w-2 rounded-full transition-colors ${
+          done ? "bg-emerald-500" : active ? "bg-primary" : "bg-border"
+        }`}
+      />
+      <span
+        className={`text-[10px] whitespace-nowrap ${active ? "text-primary" : done ? "text-emerald-400" : "text-muted-foreground"}`}
+      >
         {label}
       </span>
     </div>

@@ -1,0 +1,61 @@
+name: TG Sender encrypted cloud backup
+
+on:
+  workflow_dispatch:
+  # GitHub runs scheduled workflows only from the repository default branch.
+  schedule:
+    - cron: "17 2 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tg-sender-cloud-backup
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    if: vars.CLOUD_BACKUPS_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      rehearsal:
+        image: postgres:17
+        env:
+          POSTGRES_USER: rehearsal
+          POSTGRES_PASSWORD: ephemeral-rehearsal-only
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      # Dependency installation and system provisioning do not receive production secrets.
+      - run: pnpm install --frozen-lockfile
+      - name: Install PostgreSQL 17 client
+        shell: bash
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail --silent --show-error -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          printf '%s\n' 'deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt noble-pgdg main' | sudo tee /etc/apt/sources.list.d/tg-sender-pgdg.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y postgresql-client-17
+      - name: Encrypt, rehearse locally, archive and verify
+        run: pnpm exec tsx scripts/cloud-backup.ts
+        env:
+          PG_BIN: /usr/lib/postgresql/17/bin
+          DATABASE_URL: ${{ secrets.CLOUD_DATABASE_URL }}
+          DATABASE_SSL: require
+          DATABASE_CA: ${{ secrets.CLOUD_DATABASE_CA }}
+          BACKUP_KEY_BASE64: ${{ secrets.CLOUD_BACKUP_KEY_BASE64 }}
+          ENCRYPTION_KEY: ${{ secrets.CLOUD_ENCRYPTION_KEY }}
+          SUPABASE_URL: ${{ secrets.CLOUD_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.CLOUD_SUPABASE_SERVICE_ROLE_KEY }}
+          RESTORE_REHEARSAL_DATABASE_URL: postgresql://rehearsal:ephemeral-rehearsal-only@127.0.0.1:5432/postgres
+          LIVE_SEND_ENABLED: "false"

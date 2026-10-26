@@ -14,8 +14,19 @@ import {
 // Enums
 export const roleEnum = pgEnum("role", ["user", "admin"]);
 export const fileTypeEnum = pgEnum("file_type", ["json", "csv"]);
-export const parseModeEnum = pgEnum("parse_mode", ["HTML", "Markdown", "MarkdownV2", "None"]);
-export const broadcastStatusEnum = pgEnum("broadcast_status", ["pending", "running", "completed", "failed", "cancelled"]);
+export const parseModeEnum = pgEnum("parse_mode", [
+  "HTML",
+  "Markdown",
+  "MarkdownV2",
+  "None",
+]);
+export const broadcastStatusEnum = pgEnum("broadcast_status", [
+  "pending",
+  "running",
+  "completed",
+  "failed",
+  "cancelled",
+]);
 
 export const users = pgTable("users", {
   id: serial("id").primaryKey(),
@@ -24,9 +35,15 @@ export const users = pgTable("users", {
   email: varchar("email", { length: 320 }),
   loginMethod: varchar("loginMethod", { length: 64 }),
   role: roleEnum("role").default("user").notNull(),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().notNull(),
-  lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
+  createdAt: timestamp("createdAt", { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+  updatedAt: timestamp("updatedAt", { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+  lastSignedIn: timestamp("lastSignedIn", { withTimezone: true })
+    .defaultNow()
+    .notNull(),
 });
 
 export type User = typeof users.$inferSelect;
@@ -35,14 +52,18 @@ export type InsertUser = typeof users.$inferInsert;
 // Bot settings — one row per user
 export const botSettings = pgTable("bot_settings", {
   id: serial("id").primaryKey(),
-  userId: integer("userId").notNull(),
-  botToken: varchar("botToken", { length: 256 }).notNull(),
+  userId: integer("userId").notNull().unique(),
+  botToken: text("botToken").notNull(),
   botName: varchar("botName", { length: 128 }),
   botUsername: varchar("botUsername", { length: 128 }),
   isValid: boolean("isValid").default(false).notNull(),
-  validatedAt: timestamp("validatedAt"),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().notNull(),
+  validatedAt: timestamp("validatedAt", { withTimezone: true }),
+  createdAt: timestamp("createdAt", { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+  updatedAt: timestamp("updatedAt", { withTimezone: true })
+    .defaultNow()
+    .notNull(),
 });
 
 export type BotSettings = typeof botSettings.$inferSelect;
@@ -55,7 +76,9 @@ export const recipientLists = pgTable("recipient_lists", {
   totalCount: integer("totalCount").default(0).notNull(),
   chatIds: text("chatIds").notNull(), // JSON array stored as text
   fileType: fileTypeEnum("fileType").notNull(),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  createdAt: timestamp("createdAt", { withTimezone: true })
+    .defaultNow()
+    .notNull(),
 });
 
 export type RecipientList = typeof recipientLists.$inferSelect;
@@ -75,10 +98,14 @@ export const broadcasts = pgTable("broadcasts", {
   failedCount: integer("failedCount").default(0).notNull(),
   successRate: real("successRate"),
   status: broadcastStatusEnum("status").default("pending").notNull(),
-  startedAt: timestamp("startedAt"),
-  completedAt: timestamp("completedAt"),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().notNull(),
+  startedAt: timestamp("startedAt", { withTimezone: true }),
+  completedAt: timestamp("completedAt", { withTimezone: true }),
+  createdAt: timestamp("createdAt", { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+  updatedAt: timestamp("updatedAt", { withTimezone: true })
+    .defaultNow()
+    .notNull(),
 });
 
 export type Broadcast = typeof broadcasts.$inferSelect;
@@ -90,7 +117,7 @@ export const broadcastLogs = pgTable("broadcast_logs", {
   chatId: varchar("chatId", { length: 64 }).notNull(),
   success: boolean("success").notNull(),
   errorMessage: text("errorMessage"),
-  sentAt: timestamp("sentAt").defaultNow().notNull(),
+  sentAt: timestamp("sentAt", { withTimezone: true }).defaultNow().notNull(),
 });
 
 export type BroadcastLog = typeof broadcastLogs.$inferSelect;
@@ -106,8 +133,12 @@ export const mtprotoSessions = pgTable("mtproto_sessions", {
   telegramId: varchar("telegramId", { length: 32 }),
   sessionString: text("sessionString"),
   isActive: boolean("isActive").default(false).notNull(),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().notNull(),
+  createdAt: timestamp("createdAt", { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+  updatedAt: timestamp("updatedAt", { withTimezone: true })
+    .defaultNow()
+    .notNull(),
 });
 
 export type MtprotoSession = typeof mtprotoSessions.$inferSelect;
@@ -127,10 +158,14 @@ export const mtprotoBroadcasts = pgTable("mtproto_broadcasts", {
   failedCount: integer("failedCount").default(0).notNull(),
   successRate: real("successRate"),
   status: broadcastStatusEnum("status").default("pending").notNull(),
-  startedAt: timestamp("startedAt"),
-  completedAt: timestamp("completedAt"),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
-  updatedAt: timestamp("updatedAt").defaultNow().notNull(),
+  startedAt: timestamp("startedAt", { withTimezone: true }),
+  completedAt: timestamp("completedAt", { withTimezone: true }),
+  createdAt: timestamp("createdAt", { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+  updatedAt: timestamp("updatedAt", { withTimezone: true })
+    .defaultNow()
+    .notNull(),
 });
 
 export type MtprotoBroadcast = typeof mtprotoBroadcasts.$inferSelect;
@@ -142,7 +177,7 @@ export const mtprotoBroadcastLogs = pgTable("mtproto_broadcast_logs", {
   recipient: varchar("recipient", { length: 128 }).notNull(),
   success: boolean("success").notNull(),
   errorMessage: text("errorMessage"),
-  sentAt: timestamp("sentAt").defaultNow().notNull(),
+  sentAt: timestamp("sentAt", { withTimezone: true }).defaultNow().notNull(),
 });
 
 export type MtprotoBroadcastLog = typeof mtprotoBroadcastLogs.$inferSelect;
