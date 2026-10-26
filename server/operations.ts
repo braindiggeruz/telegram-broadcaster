@@ -2,7 +2,7 @@ import { z } from "zod";
 import { router, protectedProcedure } from "./_core/trpc";
 import { getPool } from "./connection";
 import { getSenderStatus, getWorkerStatus, resumeSender } from "./delivery";
-import { getMaintenanceStatus } from "./maintenance";
+import { getMaintenanceStatus } from "./maintenanceStatus";
 export async function readiness() {
   try {
     await getPool().query("SELECT 1 FROM app_migrations LIMIT 1");
@@ -12,7 +12,8 @@ export async function readiness() {
         w.healthy &&
         !w.last_error &&
         w.last_success_at &&
-        Date.now() - w.last_success_at.getTime() <= 90_000
+        Date.now() - w.last_success_at.getTime() <=
+          (process.env.WORKER_MODE === "scheduled" ? 120_000 : 90_000)
     );
     return {
       ready: !!latest,
@@ -111,6 +112,22 @@ export const operationsRouter = router({
           detail: job.last_error ?? job.last_rehearsal_error,
           createdAt: new Date().toISOString(),
         });
+    if (process.env.WORKER_MODE === "scheduled") {
+      const cloudBackup = maintenance.find(job => job.name === "cloud_archive");
+      if (
+        !cloudBackup?.last_success_at ||
+        Date.now() - new Date(cloudBackup.last_success_at).getTime() >
+          36 * 60 * 60 * 1000
+      )
+        exceptions.push({
+          id: "maintenance:cloud_archive:freshness",
+          title: "Облачная резервная копия требует внимания",
+          detail: cloudBackup?.last_success_at
+            ? "Более 36 часов нет подтверждённой облачной копии."
+            : "Облачное резервное копирование ещё не проверено.",
+          createdAt: new Date().toISOString(),
+        });
+    }
     return { ...status, senders, exceptions, maintenance };
   }),
   resumeSender: protectedProcedure

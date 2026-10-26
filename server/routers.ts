@@ -93,17 +93,15 @@ function campaignRouter(kind: SenderKind) {
     getProgress: protectedProcedure
       .input(idInput)
       .query(({ ctx, input }) => progress(ctx.user.id, kind, input.id)),
-    getLogs: protectedProcedure
-      .input(idInput)
-      .query(
-        async ({ ctx, input }) =>
-          (
-            await delivery.getDeliveryLogs(ctx.user.id, kind, input.id, {
-              limit: 500,
-              offset: 0,
-            })
-          ).items
-      ),
+    getLogs: protectedProcedure.input(idInput).query(
+      async ({ ctx, input }) =>
+        (
+          await delivery.getDeliveryLogs(ctx.user.id, kind, input.id, {
+            limit: 500,
+            offset: 0,
+          })
+        ).items
+    ),
     getDeliveryPage: protectedProcedure
       .input(pageInput)
       .query(({ ctx, input }) =>
@@ -326,36 +324,53 @@ const mtprotoRouter = router({
   signIn: protectedProcedure
     .input(z.object({ code: z.string().regex(/^\d{4,8}$/) }))
     .mutation(async ({ ctx, input }) => {
-      const result = await signInWithCode(ctx.user.id, input.code);
-      await db.upsertMtprotoSession(ctx.user.id, {
-        phone: result.user.phone,
-        firstName: result.user.firstName,
-        lastName: result.user.lastName,
-        username: result.user.username,
-        telegramId: result.user.id,
-        sessionString: result.sessionString,
-        isActive: true,
-      });
+      await signInWithCode(
+        ctx.user.id,
+        input.code,
+        async (result, authClient) => {
+          await db.upsertMtprotoSession(
+            ctx.user.id,
+            {
+              phone: result.user.phone,
+              firstName: result.user.firstName,
+              lastName: result.user.lastName,
+              username: result.user.username,
+              telegramId: result.user.id,
+              sessionString: result.sessionString,
+              isActive: true,
+            },
+            authClient
+          );
+        }
+      );
       return { success: true };
     }),
   signInPassword: protectedProcedure
     .input(z.object({ password: z.string().min(1).max(256) }))
     .mutation(async ({ ctx, input }) => {
-      const result = await signInWithPassword(ctx.user.id, input.password);
-      await db.upsertMtprotoSession(ctx.user.id, {
-        phone: result.user.phone,
-        firstName: result.user.firstName,
-        lastName: result.user.lastName,
-        username: result.user.username,
-        telegramId: result.user.id,
-        sessionString: result.sessionString,
-        isActive: true,
-      });
+      await signInWithPassword(
+        ctx.user.id,
+        input.password,
+        async (result, authClient) => {
+          await db.upsertMtprotoSession(
+            ctx.user.id,
+            {
+              phone: result.user.phone,
+              firstName: result.user.firstName,
+              lastName: result.user.lastName,
+              username: result.user.username,
+              telegramId: result.user.id,
+              sessionString: result.sessionString,
+              isActive: true,
+            },
+            authClient
+          );
+        }
+      );
       return { success: true };
     }),
   logout: protectedProcedure.mutation(async ({ ctx }) => {
     await logoutSession(ctx.user.id);
-    await db.deleteMtprotoSession(ctx.user.id);
     return { success: true };
   }),
   listBroadcasts: mt.list,

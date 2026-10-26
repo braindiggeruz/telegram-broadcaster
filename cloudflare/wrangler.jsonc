@@ -1,0 +1,36 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "tg-sender-v2",
+  "main": "index.ts",
+  "compatibility_date": "2026-10-26",
+  "workers_dev": true,
+  "preview_urls": false,
+  "send_metrics": false,
+  "minify": true,
+  "define": {
+    "process.env.NODE_ENV": "\"production\"",
+  },
+  "assets": {
+    "directory": "../dist/public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api", "/api/*", "/healthz", "/readyz"],
+  },
+  "vars": {
+    // Expected origin for the verified account subdomain; this file does not deploy it.
+    "APP_ORIGIN": "https://tg-sender-v2.braindigger-uz.workers.dev",
+    "LIVE_SEND_ENABLED": "false",
+    "WORKER_MODE": "scheduled",
+    "DATABASE_SSL": "verify-full",
+    "CONTACT_MIN_INTERVAL_SECONDS": "86400",
+  },
+  "triggers": {
+    "crons": ["* * * * *"],
+  },
+  "limits": {
+    "cpu_ms": 1000,
+  },
+  "observability": {
+    "enabled": false,
+  },
+}

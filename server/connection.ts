@@ -1,6 +1,8 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Pool, type PoolConfig } from "pg";
 
 let pool: Pool | undefined;
+const databaseScope = new AsyncLocalStorage<Pool>();
 
 export function databasePoolConfig(
   env: NodeJS.ProcessEnv = process.env
@@ -22,9 +24,32 @@ export function databasePoolConfig(
     throw new Error(
       "Disabling database TLS is allowed only for loopback connections"
     );
-  // pg parses these URL arguments after PoolConfig and can otherwise override TLS verification.
-  for (const key of ["sslmode", "sslcert", "sslkey", "sslrootcert"])
-    url.searchParams.delete(key);
+  // pg gives these query parameters precedence over the authority we validated.
+  const identityOverrides = new Set([
+    "host",
+    "hostaddr",
+    "port",
+    "user",
+    "username",
+    "password",
+    "dbname",
+    "database",
+    "db",
+  ]);
+  const tlsOverrides = new Set([
+    "sslmode",
+    "sslcert",
+    "sslkey",
+    "sslrootcert",
+    "ssl",
+    "sslnegotiation",
+    "uselibpqcompat",
+  ]);
+  for (const key of [...url.searchParams.keys()]) {
+    if (identityOverrides.has(key.toLowerCase()))
+      throw new Error("DATABASE_URL connection overrides are not allowed");
+    if (tlsOverrides.has(key.toLowerCase())) url.searchParams.delete(key);
+  }
   return {
     connectionString: url.toString(),
     ssl:
@@ -43,15 +68,36 @@ export function databasePoolConfig(
   };
 }
 
+function createPool(max: number): Pool {
+  const created = new Pool({ ...databasePoolConfig(), max });
+  // Never print a driver error which could contain connection information.
+  created.on("error", () =>
+    console.error("[Database] Idle connection unavailable")
+  );
+  return created;
+}
+
 export function getPool(): Pool {
-  if (!pool) {
-    pool = new Pool(databasePoolConfig());
-    // Never print a driver error which could contain connection information.
-    pool.on("error", () =>
-      console.error("[Database] Idle connection unavailable")
-    );
-  }
+  const scoped = databaseScope.getStore();
+  if (scoped) return scoped;
+  if (!pool) pool = createPool(10);
   return pool;
+}
+
+// Cloudflare sockets belong to the request that created them. Each request or
+// scheduled invocation owns a pool; nested operations share it until completion.
+export async function runWithDatabaseScope<T>(
+  callback: () => Promise<T>
+): Promise<T> {
+  if (databaseScope.getStore()) return callback();
+  const scoped = createPool(3);
+  return databaseScope.run(scoped, async () => {
+    try {
+      return await callback();
+    } finally {
+      await scoped.end();
+    }
+  });
 }
 
 export async function closePool(): Promise<void> {

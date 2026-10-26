@@ -1,8 +1,13 @@
 name: TG Sender checks
 on: [push, pull_request]
+
+permissions:
+  contents: read
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:17
@@ -18,6 +23,8 @@ jobs:
       LIVE_SEND_ENABLED: "false"
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -27,3 +34,7 @@ jobs:
       - run: pnpm check
       - run: pnpm test
       - run: pnpm build
+      - name: Build Workers and Assets without deployment or production secrets
+        run: pnpm build:cloudflare
+      - name: Exercise native workerd with an isolated local PostgreSQL database
+        run: node scripts/cloudflare-smoke.mjs

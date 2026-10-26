@@ -449,9 +449,12 @@ export class DeliveryService {
   }
 
   async getWorkerStatus() {
-    const result = await this.pool
-      .query(`SELECT worker_id,live_send_enabled,last_seen_at,last_success_at,last_error,last_seen_at>now()-interval '30 seconds' AS healthy
-      FROM delivery_worker_heartbeats ORDER BY last_seen_at DESC LIMIT 20`);
+    const result = await this.pool.query(
+      `SELECT worker_id,live_send_enabled,last_seen_at,last_success_at,last_error,
+      last_seen_at>now()-($1*interval '1 second') AS healthy
+      FROM delivery_worker_heartbeats ORDER BY last_seen_at DESC LIMIT 20`,
+      [process.env.WORKER_MODE === "scheduled" ? 120 : 30]
+    );
     return result.rows as {
       worker_id: string;
       live_send_enabled: boolean;

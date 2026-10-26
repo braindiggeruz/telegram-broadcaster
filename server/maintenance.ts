@@ -49,6 +49,7 @@ class MaintenanceError extends Error {
 }
 type Manifest = {
   format: 1;
+  dumpScope?: "public";
   database: string;
   createdAt: string;
   postgresVersion: string;
@@ -93,11 +94,11 @@ function backupKey() {
   return key;
 }
 
-function databaseIdentity() {
+function databaseIdentity(environment: NodeJS.ProcessEnv = process.env) {
   // Reuse strict URL/TLS validation, but never pass a URL or password through argv.
-  databasePoolConfig();
+  databasePoolConfig(environment);
   const url = new URL(
-    process.env.DATABASE_URL || process.env.SUPABASE_DATABASE_URL!
+    environment.DATABASE_URL || environment.SUPABASE_DATABASE_URL!
   );
   const database = decodeURIComponent(url.pathname.replace(/^\//, ""));
   if (
@@ -107,6 +108,35 @@ function databaseIdentity() {
   )
     throw new MaintenanceError("BACKUP_DATABASE_CONFIG_INVALID");
   return { url, database };
+}
+
+// Cloud backup rehearsals must restore into an isolated local PostgreSQL service,
+// while the source database and its TLS configuration remain untouched.
+export function restoreRehearsalEnvironment(
+  environment: NodeJS.ProcessEnv = process.env
+): NodeJS.ProcessEnv {
+  const target = environment.RESTORE_REHEARSAL_DATABASE_URL;
+  if (!target) return { ...environment };
+  try {
+    const url = new URL(target);
+    if (
+      !["postgres:", "postgresql:"].includes(url.protocol) ||
+      !["localhost", "127.0.0.1", "[::1]", "::1"].includes(url.hostname) ||
+      url.search ||
+      url.hash
+    )
+      throw new Error("invalid target");
+    const local = {
+      ...environment,
+      DATABASE_URL: url.toString(),
+      DATABASE_SSL: "disable",
+      DATABASE_CA: undefined,
+    };
+    databaseIdentity(local);
+    return local;
+  } catch {
+    throw new MaintenanceError("RESTORE_REHEARSAL_TARGET_INVALID");
+  }
 }
 
 function inside(parent: string, child: string) {
@@ -196,9 +226,10 @@ async function privateDirectory() {
 
 async function postgresEnvironment(
   directory: string,
-  databaseOverride?: string
+  databaseOverride?: string,
+  environment: NodeJS.ProcessEnv = process.env
 ) {
-  const { url, database } = databaseIdentity();
+  const { url, database } = databaseIdentity(environment);
   const env: NodeJS.ProcessEnv = {};
   for (const name of [
     "PATH",
@@ -214,7 +245,7 @@ async function postgresEnvironment(
     "LANG",
     "LC_ALL",
   ]) {
-    if (process.env[name]) env[name] = process.env[name];
+    if (environment[name]) env[name] = environment[name];
   }
   env.PGHOST = url.hostname.replace(/^\[|\]$/g, "");
   env.PGPORT = url.port || "5432";
@@ -223,13 +254,13 @@ async function postgresEnvironment(
   env.PGDATABASE = databaseOverride ?? database;
   env.PGCONNECT_TIMEOUT = "10";
   env.PGSSLMODE =
-    process.env.DATABASE_SSL === "disable" ? "disable" : "verify-full";
+    environment.DATABASE_SSL === "disable" ? "disable" : "verify-full";
   let certificate: string | undefined;
-  if (process.env.DATABASE_CA) {
+  if (environment.DATABASE_CA) {
     certificate = join(directory, `.postgres-ca-${randomUUID()}.crt`);
     await writeFile(
       certificate,
-      process.env.DATABASE_CA.replace(/\\n/g, "\n"),
+      environment.DATABASE_CA.replace(/\\n/g, "\n"),
       { flag: "wx", mode: 0o600 }
     );
     env.PGSSLROOTCERT = certificate;
@@ -285,6 +316,7 @@ async function snapshotManifest(
   );
   return {
     format: 1,
+    dumpScope: "public",
     database,
     createdAt: new Date().toISOString(),
     postgresVersion: identity.rows[0].version,
@@ -337,6 +369,7 @@ async function createEncryptedArchive(
         "--format=custom",
         "--no-owner",
         "--no-privileges",
+        "--schema=public",
         "--lock-wait-timeout=30000",
         `--snapshot=${snapshot}`,
       ],
@@ -458,13 +491,7 @@ export const tickMaintenance = (options: BackupOptions = {}) =>
   backupJob(false, options);
 export const runEncryptedBackup = (options: BackupOptions = {}) =>
   backupJob(true, options);
-export async function getMaintenanceStatus() {
-  return (
-    await getPool()
-      .query(`SELECT name,status,next_run_at,last_started_at,last_finished_at,last_success_at,last_file,last_bytes,last_error,
-    failure_count,last_rehearsal_at,last_rehearsal_error FROM maintenance_jobs ORDER BY name`)
-  ).rows;
-}
+export { getMaintenanceStatus } from "./maintenanceStatus";
 
 async function archiveParts(file: string, key: Buffer) {
   const size = (await stat(file)).size;
@@ -543,6 +570,7 @@ async function authenticateManifest(file: string, key: Buffer) {
   }
   if (
     manifest.format !== 1 ||
+    (manifest.dumpScope !== undefined && manifest.dumpScope !== "public") ||
     !Array.isArray(manifest.tableCounts) ||
     !Array.isArray(manifest.migrations) ||
     !manifest.tableCounts.length ||
@@ -552,6 +580,29 @@ async function authenticateManifest(file: string, key: Buffer) {
   )
     throw new MaintenanceError("BACKUP_MANIFEST_INVALID");
   return { manifest, prefixBytes: length + 4, parts };
+}
+
+/** Only a database created by this rehearsal may lose its empty default schema. */
+export async function prepareNewRehearsalDatabase(
+  client: Pick<Pool, "query">,
+  target: string,
+  source: string,
+  createdByThisRun: boolean,
+  dumpScope: unknown = undefined
+): Promise<void> {
+  if (dumpScope !== undefined && dumpScope !== "public")
+    throw new MaintenanceError("BACKUP_MANIFEST_INVALID");
+  // Legacy full-database dumps omit CREATE SCHEMA public and require template0's
+  // default schema. The authenticated marker distinguishes newer scoped dumps.
+  if (dumpScope === undefined) return;
+  if (!createdByThisRun || !REHEARSAL_NAME.test(target) || target === source)
+    throw new MaintenanceError("RESTORE_SCHEMA_TARGET_UNSAFE");
+  const identity = await client.query("SELECT current_database() AS database");
+  if (identity.rows[0]?.database !== target)
+    throw new MaintenanceError("RESTORE_SCHEMA_TARGET_MISMATCH");
+  // pg_dump --schema=public includes CREATE SCHEMA public. template0 also has
+  // public, so remove only this new target's empty schema. Never use CASCADE.
+  await client.query("DROP SCHEMA public");
 }
 
 async function performRestoreRehearsal(
@@ -583,16 +634,25 @@ async function performRestoreRehearsal(
     temporaryDatabase === identity.database
   )
     throw new MaintenanceError("RESTORE_TARGET_UNSAFE");
-  const adminUrl = new URL(identity.url);
+  const rehearsalEnvironment = restoreRehearsalEnvironment();
+  const rehearsalIdentity = databaseIdentity(rehearsalEnvironment);
+  const adminUrl = new URL(rehearsalIdentity.url);
   adminUrl.pathname = "/postgres";
   const admin = new Pool(
-    databasePoolConfig({ ...process.env, DATABASE_URL: adminUrl.toString() })
+    databasePoolConfig({
+      ...rehearsalEnvironment,
+      DATABASE_URL: adminUrl.toString(),
+    })
   );
   admin.on("error", () => {});
   let restoredPool: Pool | undefined,
     created = false,
     verified = false;
-  const pg = await postgresEnvironment(directory, temporaryDatabase);
+  const pg = await postgresEnvironment(
+    directory,
+    temporaryDatabase,
+    rehearsalEnvironment
+  );
   try {
     const exists = await admin.query(
       "SELECT 1 FROM pg_database WHERE datname=$1",
@@ -603,6 +663,22 @@ async function performRestoreRehearsal(
       `CREATE DATABASE ${quoteIdentifier(temporaryDatabase)} TEMPLATE template0`
     );
     created = true;
+    const restoreUrl = new URL(rehearsalIdentity.url);
+    restoreUrl.pathname = `/${temporaryDatabase}`;
+    restoredPool = new Pool(
+      databasePoolConfig({
+        ...rehearsalEnvironment,
+        DATABASE_URL: restoreUrl.toString(),
+      })
+    );
+    restoredPool.on("error", () => {});
+    await prepareNewRehearsalDatabase(
+      restoredPool,
+      temporaryDatabase,
+      identity.database,
+      created,
+      authenticated.manifest.dumpScope
+    );
     const restore = command(
       postgresBinary("pg_restore"),
       [
@@ -635,15 +711,6 @@ async function performRestoreRehearsal(
       await restore.done.catch(() => {});
       throw error;
     }
-    const restoreUrl = new URL(identity.url);
-    restoreUrl.pathname = `/${temporaryDatabase}`;
-    restoredPool = new Pool(
-      databasePoolConfig({
-        ...process.env,
-        DATABASE_URL: restoreUrl.toString(),
-      })
-    );
-    restoredPool.on("error", () => {});
     for (const table of authenticated.manifest.tableCounts) {
       const actual = await restoredPool.query(
         `SELECT count(*)::text AS count FROM public.${quoteIdentifier(table.table)}`

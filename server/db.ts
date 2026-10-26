@@ -18,16 +18,21 @@ import {
   decryptSecret,
   isEncryptedSecret,
 } from "./security/secrets";
-import type { PoolClient } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { senderKey, type SenderKind } from "./delivery/types";
 export { getPool } from "./connection";
 export { botSettingsDto, mtprotoSessionDto } from "./security/dto";
 
-let _db: ReturnType<typeof drizzle> | null = null;
+const databases = new WeakMap<Pool, ReturnType<typeof drizzle>>();
 
 export async function getDb() {
-  if (!_db) _db = drizzle(getPool());
-  return _db;
+  const pool = getPool();
+  let db = databases.get(pool);
+  if (!db) {
+    db = drizzle(pool);
+    databases.set(pool, db);
+  }
+  return db;
 }
 
 // ── Users ──────────────────────────────────────────────────────────────────
@@ -87,10 +92,13 @@ export async function getUserByOpenId(openId: string) {
 async function withSenderCredentialTransaction<T>(
   userId: number,
   kind: SenderKind,
-  work: (client: PoolClient) => Promise<T>
+  work: (client: PoolClient) => Promise<T>,
+  existingClient?: PoolClient
 ): Promise<T> {
   const key = senderKey(userId, kind);
-  const client = await getPool().connect();
+  // Auth commits use the exact session holding the auth lock. If it is lost,
+  // this transaction must fail rather than escape onto another live session.
+  const client = existingClient ?? (await getPool().connect());
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
@@ -100,10 +108,10 @@ async function withSenderCredentialTransaction<T>(
     await client.query("COMMIT");
     return result;
   } catch (error) {
-    await client.query("ROLLBACK");
+    await client.query("ROLLBACK").catch(() => {});
     throw error;
   } finally {
-    client.release();
+    if (!existingClient) client.release();
   }
 }
 
@@ -365,53 +373,59 @@ export async function upsertMtprotoSession(
     telegramId?: string;
     sessionString?: string;
     isActive: boolean;
-  }
+  },
+  authClient?: PoolClient
 ) {
-  return withSenderCredentialTransaction(userId, "mtproto", async client => {
-    const db = drizzle(client);
-    const [previous] = await db
-      .select()
-      .from(mtprotoSessions)
-      .where(eq(mtprotoSessions.userId, userId))
-      .for("update");
-    const oldSecret = previous?.sessionString
-      ? decryptSecret(previous.sessionString, `mtproto:${userId}`)
-      : null;
-    const nextSecret =
-      data.sessionString === undefined ? oldSecret : data.sessionString;
-    const nextIdentity =
-      data.telegramId === undefined ? previous?.telegramId : data.telegramId;
-    const identityChanged =
-      !previous ||
-      !previous.telegramId ||
-      !nextIdentity ||
-      previous.telegramId !== nextIdentity;
-    await invalidatePreviousSender(
-      client,
-      userId,
-      "mtproto",
-      identityChanged,
-      oldSecret !== nextSecret
-    );
-    const values = {
-      ...data,
-      ...(data.sessionString !== undefined
-        ? {
-            sessionString: encryptSecret(
-              data.sessionString,
-              `mtproto:${userId}`
-            ),
-          }
-        : {}),
-      updatedAt: new Date(),
-    };
-    const [row] = await db
-      .insert(mtprotoSessions)
-      .values({ userId, ...values })
-      .onConflictDoUpdate({ target: mtprotoSessions.userId, set: values })
-      .returning();
-    return { ...row, sessionString: nextSecret };
-  });
+  return withSenderCredentialTransaction(
+    userId,
+    "mtproto",
+    async client => {
+      const db = drizzle(client);
+      const [previous] = await db
+        .select()
+        .from(mtprotoSessions)
+        .where(eq(mtprotoSessions.userId, userId))
+        .for("update");
+      const oldSecret = previous?.sessionString
+        ? decryptSecret(previous.sessionString, `mtproto:${userId}`)
+        : null;
+      const nextSecret =
+        data.sessionString === undefined ? oldSecret : data.sessionString;
+      const nextIdentity =
+        data.telegramId === undefined ? previous?.telegramId : data.telegramId;
+      const identityChanged =
+        !previous ||
+        !previous.telegramId ||
+        !nextIdentity ||
+        previous.telegramId !== nextIdentity;
+      await invalidatePreviousSender(
+        client,
+        userId,
+        "mtproto",
+        identityChanged,
+        oldSecret !== nextSecret
+      );
+      const values = {
+        ...data,
+        ...(data.sessionString !== undefined
+          ? {
+              sessionString: encryptSecret(
+                data.sessionString,
+                `mtproto:${userId}`
+              ),
+            }
+          : {}),
+        updatedAt: new Date(),
+      };
+      const [row] = await db
+        .insert(mtprotoSessions)
+        .values({ userId, ...values })
+        .onConflictDoUpdate({ target: mtprotoSessions.userId, set: values })
+        .returning();
+      return { ...row, sessionString: nextSecret };
+    },
+    authClient
+  );
 }
 
 export async function deleteMtprotoSession(userId: number) {
