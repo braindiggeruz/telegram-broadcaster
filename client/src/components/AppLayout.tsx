@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Link, useLocation } from "wouter";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   LayoutDashboard,
   Bot,
@@ -10,153 +11,143 @@ import {
   Menu,
   X,
   Send,
-  ChevronRight,
   UserCircle,
   Radio,
+  Zap,
+  LogOut,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-
-const botNavItems = [
-  { href: "/", icon: LayoutDashboard, label: "Dashboard" },
-  { href: "/bot-token", icon: Bot, label: "Bot Token" },
-  { href: "/recipients", icon: Users, label: "Recipients" },
-  { href: "/composer", icon: MessageSquare, label: "Message Composer" },
-  { href: "/launch", icon: Rocket, label: "Broadcast Launch" },
-  { href: "/history", icon: History, label: "Broadcast History" },
+import { trpc } from "@/lib/trpc";
+import { Button } from "@/components/ui/button";
+import { toast } from "sonner";
+const items = [
+  { href: "/", icon: LayoutDashboard, label: "Обзор" },
+  { href: "/autopilot", icon: Zap, label: "Автопилот" },
+  { href: "/recipients", icon: Users, label: "Аудитория" },
+  { href: "/composer", icon: MessageSquare, label: "Сообщение" },
+  { href: "/launch", icon: Rocket, label: "Рассылка через бота" },
+  { href: "/user-broadcast", icon: Radio, label: "Рассылка от аккаунта" },
+  { href: "/history", icon: History, label: "Все кампании" },
 ];
-
-const userNavItems = [
-  { href: "/user-account", icon: UserCircle, label: "User Account" },
-  { href: "/user-broadcast", icon: Radio, label: "User Broadcast" },
-];
-
 function SidebarContent({ onClose }: { onClose?: () => void }) {
   const [location] = useLocation();
-
+  const client = useQueryClient();
+  const logout = trpc.auth.logout.useMutation({
+    onSuccess: () => {
+      try {
+        Object.keys(localStorage)
+          .filter(key => key.startsWith("tg-sender:"))
+          .forEach(key => localStorage.removeItem(key));
+      } catch {}
+      client.clear();
+      window.location.assign("/");
+    },
+    onError: error => toast.error(error.message),
+  });
   return (
     <div className="flex h-full flex-col">
-      {/* Logo */}
-      <div className="flex items-center gap-3 px-4 py-5 border-b border-sidebar-border">
-        <div className="flex h-9 w-9 items-center justify-center rounded-xl gradient-primary glow-primary">
-          <Send className="h-4 w-4 text-white" />
+      <div className="flex items-center gap-3 px-5 py-6 border-b border-sidebar-border">
+        <div className="flex h-10 w-10 items-center justify-center rounded-xl gradient-primary">
+          <Send className="h-5 w-5 text-white" />
         </div>
         <div>
-          <p className="text-sm font-semibold text-sidebar-foreground leading-tight">Telegram</p>
-          <p className="text-xs text-muted-foreground leading-tight">Broadcaster</p>
+          <p className="text-sm font-semibold">
+            TG Sender <span className="text-primary">2.0</span>
+          </p>
+          <p className="text-[11px] text-muted-foreground">
+            Рассылки под контролем
+          </p>
         </div>
         {onClose && (
           <button
+            aria-label="Закрыть меню"
             onClick={onClose}
-            className="ml-auto rounded-md p-1 text-muted-foreground hover:text-foreground hover:bg-sidebar-accent"
+            className="ml-auto rounded-md p-2 hover:bg-muted"
           >
             <X className="h-4 w-4" />
           </button>
         )}
       </div>
-
-      {/* Nav */}
-      <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-0.5">
-        <p className="px-3 mb-2 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/60">
-          Bot API
+      <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
+        {items.map(({ href, icon: Icon, label }) => (
+          <Link
+            key={href}
+            href={href}
+            onClick={onClose}
+            className={cn(
+              "nav-item",
+              (href === "/" ? location === "/" : location.startsWith(href)) &&
+                "active"
+            )}
+          >
+            <Icon className="h-4 w-4 shrink-0" />
+            <span>{label}</span>
+          </Link>
+        ))}
+        <p className="pt-6 pb-2 px-3 text-[10px] uppercase tracking-widest text-muted-foreground">
+          Подключения
         </p>
-        {botNavItems.map(({ href, icon: Icon, label }) => {
-          const isActive = href === "/" ? location === "/" : location.startsWith(href);
-          return (
-            <Link key={href} href={href} onClick={onClose}>
-              <div className={cn("nav-item group", isActive && "active")}>
-                <Icon className={cn("h-4 w-4 shrink-0", isActive ? "text-primary" : "text-muted-foreground group-hover:text-foreground")} />
-                <span className={cn("flex-1", isActive ? "text-primary" : "text-sidebar-foreground/80 group-hover:text-foreground")}>
-                  {label}
-                </span>
-                {isActive && <ChevronRight className="h-3 w-3 text-primary/60" />}
-              </div>
-            </Link>
-          );
-        })}
-
-        <div className="pt-4 pb-1">
-          <p className="px-3 mb-2 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/60">
-            User Account
-          </p>
-        </div>
-        {userNavItems.map(({ href, icon: Icon, label }) => {
-          const isActive = location.startsWith(href);
-          return (
-            <Link key={href} href={href} onClick={onClose}>
-              <div className={cn("nav-item group", isActive && "active")}>
-                <Icon className={cn("h-4 w-4 shrink-0", isActive ? "text-primary" : "text-muted-foreground group-hover:text-foreground")} />
-                <span className={cn("flex-1", isActive ? "text-primary" : "text-sidebar-foreground/80 group-hover:text-foreground")}>
-                  {label}
-                </span>
-                {isActive && <ChevronRight className="h-3 w-3 text-primary/60" />}
-              </div>
-            </Link>
-          );
-        })}
+        {[
+          { href: "/bot-token", icon: Bot, label: "Telegram-бот" },
+          { href: "/user-account", icon: UserCircle, label: "Личный аккаунт" },
+        ].map(({ href, icon: Icon, label }) => (
+          <Link
+            key={href}
+            href={href}
+            onClick={onClose}
+            className={cn("nav-item", location === href && "active")}
+          >
+            <Icon className="h-4 w-4" />
+            {label}
+          </Link>
+        ))}
       </nav>
-
-      {/* Footer */}
-      <div className="border-t border-sidebar-border px-4 py-4">
-        <div className="flex items-center gap-2.5">
-          <div className="h-2 w-2 rounded-full bg-emerald-400 pulse-dot" />
-          <span className="text-xs text-muted-foreground">API Connected</span>
-        </div>
+      <div className="border-t border-sidebar-border p-4">
+        <Button
+          variant="ghost"
+          className="w-full justify-start text-muted-foreground"
+          disabled={logout.isPending}
+          onClick={() => logout.mutate()}
+        >
+          <LogOut className="h-4 w-4" />
+          Выйти
+        </Button>
       </div>
     </div>
   );
 }
-
 export default function AppLayout({ children }: { children: React.ReactNode }) {
-  const [mobileOpen, setMobileOpen] = useState(false);
-
+  const [open, setOpen] = useState(false);
   return (
-    <div className="flex h-screen bg-background overflow-hidden">
-      {/* Desktop Sidebar */}
+    <div className="flex h-dvh bg-background overflow-hidden">
       <aside className="hidden md:flex w-60 shrink-0 flex-col bg-sidebar border-r border-sidebar-border">
         <SidebarContent />
       </aside>
-
-      {/* Mobile overlay */}
-      {mobileOpen && (
-        <div
-          className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm md:hidden"
-          onClick={() => setMobileOpen(false)}
-        />
+      {open && (
+        <>
+          <div
+            className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm md:hidden"
+            onClick={() => setOpen(false)}
+          />
+          <aside className="fixed inset-y-0 left-0 z-50 w-64 bg-sidebar border-r border-sidebar-border md:hidden">
+            <SidebarContent onClose={() => setOpen(false)} />
+          </aside>
+        </>
       )}
-
-      {/* Mobile Sidebar */}
-      <aside
-        className={cn(
-          "fixed inset-y-0 left-0 z-50 w-64 bg-sidebar border-r border-sidebar-border transform transition-transform duration-300 ease-out md:hidden",
-          mobileOpen ? "translate-x-0" : "-translate-x-full"
-        )}
-      >
-        <SidebarContent onClose={() => setMobileOpen(false)} />
-      </aside>
-
-      {/* Main content */}
-      <div className="flex flex-1 flex-col overflow-hidden">
-        {/* Mobile top bar */}
+      <div className="flex flex-1 min-w-0 flex-col overflow-hidden">
         <div className="flex items-center gap-3 border-b border-border px-4 py-3 md:hidden bg-card/50">
           <button
-            onClick={() => setMobileOpen(true)}
-            className="rounded-md p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted"
+            aria-label="Открыть меню"
+            onClick={() => setOpen(true)}
+            className="rounded-md p-2 hover:bg-muted"
           >
             <Menu className="h-5 w-5" />
           </button>
-          <div className="flex items-center gap-2">
-            <div className="flex h-7 w-7 items-center justify-center rounded-lg gradient-primary">
-              <Send className="h-3.5 w-3.5 text-white" />
-            </div>
-            <span className="text-sm font-semibold">Telegram Broadcaster</span>
-          </div>
+          <Send className="h-4 w-4 text-primary" />
+          <span className="text-sm font-semibold">TG Sender 2.0</span>
         </div>
-
-        {/* Page content */}
         <main className="flex-1 overflow-y-auto">
-          <div className="fade-in">
-            {children}
-          </div>
+          <div className="fade-in">{children}</div>
         </main>
       </div>
     </div>

@@ -1,116 +1,141 @@
-// Tests run in standalone mode — DB calls are mocked to avoid network dependency.
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { appRouter } from "./routers";
 import type { TrpcContext } from "./_core/context";
-
-// Mock the DB module so tests don't need a real Supabase connection
-vi.mock("./db", () => ({
-  getDb: vi.fn().mockResolvedValue(null),
-  getBotSettings: vi.fn().mockResolvedValue(null),
-  upsertBotSettings: vi.fn().mockResolvedValue(undefined),
-  getRecipientLists: vi.fn().mockResolvedValue([]),
-  getRecipientList: vi.fn().mockResolvedValue(null),
-  createRecipientList: vi.fn().mockResolvedValue({ id: 1 }),
-  deleteRecipientList: vi.fn().mockResolvedValue(undefined),
-  getBroadcasts: vi.fn().mockResolvedValue([]),
-  getBroadcast: vi.fn().mockResolvedValue(null),
-  createBroadcast: vi.fn().mockResolvedValue({ id: 1 }),
-  updateBroadcastStatus: vi.fn().mockResolvedValue(undefined),
-  updateBroadcastProgress: vi.fn().mockResolvedValue(undefined),
-  getBroadcastLogs: vi.fn().mockResolvedValue([]),
-  createBroadcastLog: vi.fn().mockResolvedValue(undefined),
-  getDashboardStats: vi.fn().mockResolvedValue({
-    totalBroadcasts: 0,
-    totalMessagesSent: 0,
-    overallSuccessRate: 0,
-    recentBroadcasts: [],
-  }),
-  getMtprotoSession: vi.fn().mockResolvedValue(null),
-  upsertMtprotoSession: vi.fn().mockResolvedValue(undefined),
-  deleteMtprotoSession: vi.fn().mockResolvedValue(undefined),
-  getMtprotoBroadcasts: vi.fn().mockResolvedValue([]),
-  getMtprotoBroadcast: vi.fn().mockResolvedValue(null),
-  createMtprotoBroadcast: vi.fn().mockResolvedValue({ id: 1 }),
-  updateMtprotoBroadcastStatus: vi.fn().mockResolvedValue(undefined),
-  updateMtprotoBroadcastProgress: vi.fn().mockResolvedValue(undefined),
-  createMtprotoBroadcastLog: vi.fn().mockResolvedValue(undefined),
-  getMtprotoBroadcastLogs: vi.fn().mockResolvedValue([]),
-  upsertUser: vi.fn().mockResolvedValue(undefined),
-  getUserByOpenId: vi.fn().mockResolvedValue(null),
-  getUserById: vi.fn().mockResolvedValue(null),
+import * as db from "./db";
+import { dashboard } from "./dashboard";
+vi.mock("./dashboard", () => ({
+  dashboard: vi
+    .fn()
+    .mockResolvedValue({
+      totalBroadcasts: 0,
+      totalMessagesSent: 0,
+      overallSuccessRate: 0,
+      recentBroadcasts: [],
+    }),
 }));
 
-function createCtx(userId = 1): TrpcContext {
+vi.mock("./db", () => ({
+  getBotSettings: vi.fn().mockResolvedValue(null),
+  upsertBotSettings: vi.fn(),
+  getRecipientLists: vi.fn().mockResolvedValue([]),
+  getRecipientList: vi.fn().mockResolvedValue(null),
+  createRecipientList: vi.fn(),
+  deleteRecipientList: vi.fn(),
+  getBroadcasts: vi.fn().mockResolvedValue([]),
+  getBroadcast: vi.fn().mockResolvedValue(null),
+  getMtprotoBroadcasts: vi.fn().mockResolvedValue([]),
+  getMtprotoBroadcast: vi.fn().mockResolvedValue(null),
+  getMtprotoSession: vi.fn().mockResolvedValue(null),
+  upsertMtprotoSession: vi.fn(),
+  deleteMtprotoSession: vi.fn(),
+  getDashboardStats: vi
+    .fn()
+    .mockResolvedValue({
+      totalBroadcasts: 0,
+      totalMessagesSent: 0,
+      overallSuccessRate: 0,
+      recentBroadcasts: [],
+    }),
+}));
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.stubEnv("APP_ORIGIN", "https://sender.example");
+});
+afterEach(() => vi.unstubAllEnvs());
+
+function createCtx(userId: number | null = 42): TrpcContext {
   return {
-    user: {
-      id: userId,
-      openId: "standalone",
-      email: null,
-      name: "Admin",
-      loginMethod: null,
-      role: "admin" as const,
-      createdAt: new Date(),
-      lastSignedIn: new Date(),
-    },
-    req: { protocol: "https", headers: {} } as TrpcContext["req"],
+    user:
+      userId === null
+        ? null
+        : {
+            id: userId,
+            openId: "configured-owner",
+            email: null,
+            name: "Owner",
+            loginMethod: "password",
+            role: "admin",
+            createdAt: new Date(),
+            lastSignedIn: new Date(),
+          },
+    req: {
+      protocol: "https",
+      headers: { origin: "https://sender.example" },
+    } as TrpcContext["req"],
     res: { clearCookie: vi.fn() } as unknown as TrpcContext["res"],
   };
 }
 
-describe("auth.logout", () => {
-  it("returns success in standalone mode", async () => {
-    const ctx = createCtx();
-    const caller = appRouter.createCaller(ctx);
-    const result = await caller.auth.logout();
-    expect(result.success).toBe(true);
+describe("authenticated application API", () => {
+  it("rejects anonymous access before any application data query", async () => {
+    const caller = appRouter.createCaller(createCtx(null));
+    for (const action of [
+      () => caller.broadcast.list(),
+      () => caller.bot.get(),
+      () => caller.mtproto.getSession(),
+      () => caller.recipients.list(),
+      () => caller.stats.dashboard(),
+    ]) {
+      await expect(action()).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    }
+    expect(db.getBroadcasts).not.toHaveBeenCalled();
+    expect(db.getBotSettings).not.toHaveBeenCalled();
+    expect(db.getRecipientLists).not.toHaveBeenCalled();
   });
-});
 
-describe("broadcast router", () => {
-  it("returns empty list when no broadcasts exist", async () => {
-    const ctx = createCtx(999999);
-    const caller = appRouter.createCaller(ctx);
-    const result = await caller.broadcast.list();
-    expect(Array.isArray(result)).toBe(true);
+  it("scopes list and detail queries to the authenticated owner", async () => {
+    const caller = appRouter.createCaller(createCtx(79));
+    expect(await caller.broadcast.list()).toEqual([]);
+    expect(await caller.broadcast.get({ id: 991 })).toBeNull();
+    expect(await caller.recipients.get({ id: 992 })).toBeNull();
+    expect(db.getBroadcasts).toHaveBeenCalledWith(79);
+    expect(db.getBroadcast).toHaveBeenCalledWith(991, 79);
+    expect(db.getRecipientList).toHaveBeenCalledWith(992, 79);
   });
 
-  it("returns null for non-existent broadcast", async () => {
-    const ctx = createCtx(999999);
-    const caller = appRouter.createCaller(ctx);
-    const result = await caller.broadcast.get({ id: 999999 });
-    expect(result).toBeNull();
+  it("uses explicit DTOs that do not expose bot tokens or MTProto sessions", async () => {
+    vi.mocked(db.getBotSettings).mockResolvedValueOnce({
+      id: 1,
+      botToken: "PRIVATE_BOT_TOKEN",
+      userId: 79,
+      isValid: true,
+      botName: "Example",
+    } as any);
+    vi.mocked(db.getMtprotoSession).mockResolvedValueOnce({
+      id: 2,
+      sessionString: "PRIVATE_SESSION",
+      userId: 79,
+      isActive: true,
+    } as any);
+    const caller = appRouter.createCaller(createCtx(79));
+    const bot = await caller.bot.get();
+    const session = await caller.mtproto.getSession();
+    expect(bot).toMatchObject({ botName: "Example", configured: true });
+    expect(bot).not.toHaveProperty("botToken");
+    expect(session).not.toHaveProperty("sessionString");
+    expect(JSON.stringify({ bot, session })).not.toContain("PRIVATE");
   });
-});
 
-describe("stats router", () => {
-  it("returns dashboard stats with correct shape", async () => {
-    const ctx = createCtx(999999);
-    const caller = appRouter.createCaller(ctx);
-    const stats = await caller.stats.dashboard();
-    expect(stats).toHaveProperty("totalBroadcasts");
-    expect(stats).toHaveProperty("totalMessagesSent");
-    expect(stats).toHaveProperty("overallSuccessRate");
-    expect(stats).toHaveProperty("recentBroadcasts");
-    expect(typeof stats.totalBroadcasts).toBe("number");
-    expect(typeof stats.overallSuccessRate).toBe("number");
-    expect(Array.isArray(stats.recentBroadcasts)).toBe(true);
+  it("returns owner-scoped empty states without inventing activity", async () => {
+    const caller = appRouter.createCaller(createCtx(79));
+    expect(await caller.stats.dashboard()).toEqual({
+      totalBroadcasts: 0,
+      totalMessagesSent: 0,
+      overallSuccessRate: 0,
+      recentBroadcasts: [],
+    });
+    expect(dashboard).toHaveBeenCalledWith(79);
+    expect(await caller.bot.get()).toBeNull();
+    expect(await caller.recipients.list()).toEqual([]);
   });
-});
 
-describe("bot router", () => {
-  it("returns null when no bot settings configured", async () => {
-    const ctx = createCtx(999999);
-    const caller = appRouter.createCaller(ctx);
-    const result = await caller.bot.get();
-    expect(result).toBeNull();
-  });
-});
-
-describe("recipients router", () => {
-  it("returns empty list when no recipient lists exist", async () => {
-    const ctx = createCtx(999999);
-    const caller = appRouter.createCaller(ctx);
-    const result = await caller.recipients.list();
-    expect(Array.isArray(result)).toBe(true);
+  it("rejects mutation CSRF before deleting any list", async () => {
+    const ctx = createCtx(79);
+    ctx.req.headers.origin = "https://other.example";
+    await expect(
+      appRouter.createCaller(ctx).recipients.delete({ id: 1 })
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(db.deleteRecipientList).not.toHaveBeenCalled();
   });
 });
