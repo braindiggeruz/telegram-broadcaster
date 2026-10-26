@@ -38,3 +38,13 @@ jobs:
         run: pnpm build:cloudflare
       - name: Exercise native workerd with an isolated local PostgreSQL database
         run: node scripts/cloudflare-smoke.mjs
+      - name: Preserve verified deployment build
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tg-sender-build-${{ github.sha }}
+          path: |
+            dist/public/
+            dist/cloudflare/index.js
+            dist/cloudflare/index.js.map
+          retention-days: 3
+          if-no-files-found: error

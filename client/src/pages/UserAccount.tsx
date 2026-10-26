@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { LOGIN_PHONE_ERROR, normalizeLoginPhone } from "@shared/loginPhone";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -28,12 +29,37 @@ import {
 
 type AuthStep = "idle" | "phone" | "code" | "password" | "done";
 
+function codeRequestErrorMessage(message: string) {
+  try {
+    const issues: unknown = JSON.parse(message);
+    if (
+      Array.isArray(issues) &&
+      issues.length > 0 &&
+      issues.every(
+        issue =>
+          issue &&
+          typeof issue === "object" &&
+          "path" in issue &&
+          Array.isArray(issue.path) &&
+          issue.path[0] === "phone"
+      )
+    ) {
+      return LOGIN_PHONE_ERROR;
+    }
+  } catch {
+    // Telegram errors are ordinary messages and should remain visible.
+  }
+  return message || "Не удалось запросить код. Попробуйте ещё раз.";
+}
+
 export default function UserAccount() {
   const utils = trpc.useUtils();
   const { data: session, isLoading } = trpc.mtproto.getSession.useQuery();
 
   const [step, setStep] = useState<AuthStep>("idle");
   const [phone, setPhone] = useState("");
+  const [phoneError, setPhoneError] = useState<string | null>(null);
+  const codeRequestPending = useRef(false);
   const [code, setCode] = useState("");
   const [password, setPassword] = useState("");
 
@@ -42,8 +68,24 @@ export default function UserAccount() {
       toast.success("Код отправлен на ваш Telegram!");
       setStep("code");
     },
-    onError: e => toast.error(`Ошибка: ${e.message}`),
+    onError: e => toast.error(codeRequestErrorMessage(e.message)),
+    onSettled: () => {
+      codeRequestPending.current = false;
+    },
   });
+
+  const requestCode = () => {
+    if (codeRequestPending.current || sendCodeMutation.isPending) return;
+    const normalized = normalizeLoginPhone(phone);
+    if (!normalized) {
+      setPhoneError(LOGIN_PHONE_ERROR);
+      return;
+    }
+    setPhoneError(null);
+    setPhone(normalized);
+    codeRequestPending.current = true;
+    sendCodeMutation.mutate({ phone: normalized });
+  };
 
   const signInMutation = trpc.mtproto.signIn.useMutation({
     onSuccess: () => {
@@ -79,6 +121,7 @@ export default function UserAccount() {
       toast.success("Аккаунт отключён");
       setStep("idle");
       setPhone("");
+      setPhoneError(null);
       setCode("");
       setPassword("");
       utils.mtproto.getSession.invalidate();
@@ -241,32 +284,70 @@ export default function UserAccount() {
 
             {/* Phone step */}
             {(step === "idle" || step === "phone") && (
-              <div className="space-y-3">
+              <form
+                className="space-y-3"
+                noValidate
+                onSubmit={e => {
+                  e.preventDefault();
+                  requestCode();
+                }}
+              >
                 <div className="space-y-2">
-                  <label className="text-sm font-medium text-foreground flex items-center gap-2">
+                  <label
+                    htmlFor="telegram-login-phone"
+                    className="text-sm font-medium text-foreground flex items-center gap-2"
+                  >
                     <Phone className="h-4 w-4 text-muted-foreground" />
                     Номер телефона
                   </label>
                   <Input
-                    placeholder="+79001234567"
+                    id="telegram-login-phone"
+                    type="tel"
+                    inputMode="tel"
+                    autoComplete="tel"
+                    maxLength={64}
+                    placeholder="+998 90 123 45 67"
                     value={phone}
-                    onChange={e => setPhone(e.target.value)}
-                    className="bg-background/50 border-border/60 focus:border-primary/60 font-mono"
-                    onKeyDown={e =>
-                      e.key === "Enter" &&
-                      phone &&
-                      sendCodeMutation.mutate({ phone })
+                    onChange={e => {
+                      setPhone(e.target.value);
+                      setPhoneError(null);
+                    }}
+                    onBlur={() =>
+                      setPhoneError(
+                        normalizeLoginPhone(phone) ? null : LOGIN_PHONE_ERROR
+                      )
                     }
+                    disabled={sendCodeMutation.isPending}
+                    aria-invalid={!!phoneError}
+                    aria-describedby={
+                      phoneError
+                        ? "telegram-login-phone-help telegram-login-phone-error"
+                        : "telegram-login-phone-help"
+                    }
+                    className="bg-background/50 border-border/60 focus:border-primary/60 font-mono"
                   />
-                  <p className="text-xs text-muted-foreground flex items-center gap-1">
+                  <p
+                    id="telegram-login-phone-help"
+                    className="text-xs text-muted-foreground flex items-center gap-1"
+                  >
                     <Info className="h-3 w-3" />
-                    Введите в международном формате: +7, +1, +44 и т.д.
+                    Укажите + и код страны. Пробелы, скобки и дефисы можно
+                    оставить.
                   </p>
+                  {phoneError && (
+                    <p
+                      id="telegram-login-phone-error"
+                      role="alert"
+                      className="text-xs text-destructive"
+                    >
+                      {phoneError}
+                    </p>
+                  )}
                 </div>
                 <Button
+                  type="submit"
                   className="w-full"
-                  onClick={() => sendCodeMutation.mutate({ phone })}
-                  disabled={!phone || sendCodeMutation.isPending}
+                  disabled={sendCodeMutation.isPending}
                 >
                   {sendCodeMutation.isPending ? (
                     <>
@@ -280,7 +361,7 @@ export default function UserAccount() {
                     </>
                   )}
                 </Button>
-              </div>
+              </form>
             )}
 
             {/* Code step */}
@@ -315,6 +396,7 @@ export default function UserAccount() {
                   <Button
                     variant="outline"
                     className="flex-1"
+                    disabled={sendCodeMutation.isPending}
                     onClick={() => {
                       setStep("phone");
                       setCode("");
@@ -343,7 +425,7 @@ export default function UserAccount() {
                   variant="ghost"
                   size="sm"
                   className="w-full text-muted-foreground"
-                  onClick={() => sendCodeMutation.mutate({ phone })}
+                  onClick={requestCode}
                   disabled={sendCodeMutation.isPending}
                 >
                   Отправить код повторно
