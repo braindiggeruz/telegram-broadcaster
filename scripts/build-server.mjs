@@ -1,6 +1,10 @@
 import { build } from "esbuild";
 await build({
-  entryPoints: { index: "server/_core/index.ts", worker: "server/worker.ts" },
+  entryPoints: {
+    index: "server/_core/index.ts",
+    worker: "server/worker.ts",
+    migrate: "scripts/migrate.ts",
+  },
   platform: "node",
   packages: "external",
   bundle: true,

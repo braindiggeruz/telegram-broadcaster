@@ -1,0 +1,197 @@
+name: TG Sender container
+
+on:
+  push:
+    branches: [codex/tg-sender-v2]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tg-sender-container-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  container-smoke:
+    if: github.event_name != 'pull_request' || github.head_ref == 'codex/tg-sender-v2'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source without persistent credentials
+        # Official actions/checkout v7.0.1, pinned to its release commit.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Build Linux amd64 image without publishing
+        run: docker build --pull --platform linux/amd64 --tag tg-sender:ci .
+
+      - name: Create isolated synthetic runtime configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          node --input-type=module <<'NODE'
+          import { randomBytes, scryptSync } from 'node:crypto';
+          import { mkdirSync, writeFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          const directory = join(process.env.RUNNER_TEMP, 'tg-sender-container-smoke');
+          mkdirSync(directory, { mode: 0o700 });
+          const dbPassword = randomBytes(32).toString('hex');
+          const ownerPassword = randomBytes(32).toString('base64url');
+          const salt = randomBytes(16);
+          const key = scryptSync(ownerPassword, salt, 64, { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 });
+          const ownerHash = `scrypt$16384$8$1$${salt.toString('base64url')}$${key.toString('base64url')}`;
+          const config = {
+            DATABASE_URL: `postgresql://tgsender:${dbPassword}@127.0.0.1:5432/tgsender`,
+            DATABASE_SSL: 'disable',
+            APP_ORIGIN: 'https://tg-sender-ci.invalid',
+            OWNER_OPEN_ID: 'ci-owner',
+            OWNER_PASSWORD_HASH: ownerHash,
+            SESSION_SECRET: randomBytes(48).toString('base64url'),
+            ENCRYPTION_KEY: randomBytes(32).toString('base64'),
+            BACKUP_KEY_BASE64: randomBytes(32).toString('base64'),
+            TELEGRAM_WEBHOOK_SECRET: randomBytes(32).toString('hex'),
+            LIVE_SEND_ENABLED: 'false',
+          };
+          // Masks protect even unexpected future error paths; no real secrets are used.
+          for (const value of [dbPassword, ownerPassword, ownerHash, ...Object.values(config).filter(value => value.length > 30)]) {
+            console.log(`::add-mask::${value}`);
+          }
+          const save = (name, value) => writeFileSync(join(directory, name), value, { mode: 0o600, flag: 'wx' });
+          save('app.env', Object.entries(config).map(([key, value]) => `${key}=${value}`).join('\n') + '\n');
+          save('postgres.env', `POSTGRES_USER=tgsender\nPOSTGRES_DB=tgsender\nPOSTGRES_PASSWORD=${dbPassword}\n`);
+          save('login.json', JSON.stringify({ json: { password: ownerPassword } }));
+          NODE
+
+      - name: Start PostgreSQL 17 and the application in one network namespace
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --detach --name tg-sender-ci-postgres \
+            --env-file "$RUNNER_TEMP/tg-sender-container-smoke/postgres.env" \
+            --health-cmd 'pg_isready -U tgsender -d tgsender' \
+            --health-interval 2s --health-timeout 3s --health-retries 30 \
+            postgres:17 > /dev/null
+          for attempt in $(seq 1 45); do
+            if [ "$(docker inspect --format '{{.State.Health.Status}}' tg-sender-ci-postgres)" = healthy ]; then
+              break
+            fi
+            sleep 2
+          done
+          test "$(docker inspect --format '{{.State.Health.Status}}' tg-sender-ci-postgres)" = healthy
+          # Loopback is shared only with this disposable PostgreSQL container.
+          # The app correctly rejects DATABASE_SSL=disable for remote hosts.
+          docker run --detach --name tg-sender-ci-app \
+            --network container:tg-sender-ci-postgres \
+            --env-file "$RUNNER_TEMP/tg-sender-container-smoke/app.env" \
+            --cap-drop ALL --security-opt no-new-privileges:true \
+            tg-sender:ci > /dev/null
+
+      - name: Verify API, worker readiness and non-root runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec tg-sender-ci-app node --input-type=module -e '
+            if (process.getuid() === 0 || process.env.LIVE_SEND_ENABLED !== "false") process.exit(1);
+            const deadline = Date.now() + 120000;
+            while (Date.now() < deadline) {
+              try {
+                const response = await fetch("http://127.0.0.1:3037/readyz", { signal: AbortSignal.timeout(3000) });
+                if (response.ok && (await response.json()).ready === true) {
+                  const page = await fetch("http://127.0.0.1:3037/");
+                  if (!page.ok || !(await page.text()).includes("<html")) process.exit(1);
+                  console.log("Container API, worker, static frontend and non-root checks passed.");
+                  process.exit(0);
+                }
+              } catch {}
+              await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+            console.error("CONTAINER_READINESS_TIMEOUT");
+            process.exit(1);
+          '
+
+      - name: Verify owner login, secure cookie and authenticated read
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec --interactive tg-sender-ci-app node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            try {
+              const response = await fetch("http://127.0.0.1:3037/api/trpc/auth.login", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", Origin: process.env.APP_ORIGIN },
+                body: readFileSync(0, "utf8"),
+                signal: AbortSignal.timeout(10000),
+              });
+              const body = await response.json();
+              const cookie = response.headers.getSetCookie().find(value => value.startsWith("app_session_id="));
+              if (!response.ok || body.result?.data?.json?.success !== true || !cookie || !/;\s*HttpOnly/i.test(cookie) || !/;\s*Secure/i.test(cookie) || !/;\s*SameSite=Strict/i.test(cookie)) throw new Error();
+              const me = await fetch("http://127.0.0.1:3037/api/trpc/auth.me", {
+                headers: { Cookie: cookie.split(";")[0] }, signal: AbortSignal.timeout(5000),
+              });
+              const user = (await me.json()).result?.data?.json;
+              if (!me.ok || user?.openId !== "ci-owner") throw new Error();
+              console.log("Container login, secure session cookie and authenticated read passed.");
+            } catch {
+              console.error("CONTAINER_AUTH_SMOKE_FAILED");
+              process.exit(1);
+            }
+          ' < "$RUNNER_TEMP/tg-sender-container-smoke/login.json"
+
+      - name: Verify PostgreSQL 17 tools and worker-created encrypted backup
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec tg-sender-ci-app pg_dump --version | grep -E 'PostgreSQL\) 17\.'
+          docker exec tg-sender-ci-app pg_restore --version | grep -E 'PostgreSQL\) 17\.'
+          docker exec tg-sender-ci-app node --input-type=module -e '
+            import { readFileSync, statSync, existsSync } from "node:fs";
+            import { join } from "node:path";
+            import pg from "pg";
+            const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, ssl: false });
+            const deadline = Date.now() + 120000;
+            let passed = false;
+            try {
+              while (Date.now() < deadline) {
+                const row = (await pool.query("SELECT status,last_file,last_bytes FROM maintenance_jobs WHERE name=$1", ["daily_backup"])).rows[0];
+                if (row?.status === "FAILED") break;
+                if (row?.status === "SUCCEEDED" && /^[a-zA-Z0-9_.-]+\.tgbak$/.test(row.last_file)) {
+                  const file = join("/app/.runtime/backups", row.last_file);
+                  if (!existsSync(file)) break;
+                  const data = readFileSync(file);
+                  passed = data.length > 36 && data.subarray(0, 8).toString() === "TGSBKP01" && Number(row.last_bytes) === data.length && (statSync(file).mode & 0o077) === 0;
+                  break;
+                }
+                await new Promise(resolve => setTimeout(resolve, 2000));
+              }
+            } catch {} finally {
+              await pool.end();
+            }
+            if (!passed) {
+              console.error("CONTAINER_ENCRYPTED_BACKUP_SMOKE_FAILED");
+              process.exit(1);
+            }
+            console.log("PostgreSQL17 encrypted scheduled backup created with private permissions.");
+          '
+
+      - name: Safe failure diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          docker ps --all --format 'table {{.Names}}\t{{.Status}}'
+          docker logs --tail 80 tg-sender-ci-app 2>&1 || true
+
+      - name: Remove disposable test containers and credentials
+        if: always()
+        shell: bash
+        run: |
+          docker rm --force --volumes tg-sender-ci-app tg-sender-ci-postgres > /dev/null 2>&1 || true
+          task_smoke_directory="$RUNNER_TEMP/tg-sender-container-smoke"
+          if [ -d "$task_smoke_directory" ]; then
+            find "$task_smoke_directory" -maxdepth 1 -type f -delete
+            rmdir "$task_smoke_directory"
+          fi
