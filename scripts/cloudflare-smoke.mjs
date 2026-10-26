@@ -391,6 +391,23 @@ async function run() {
     },
     true
   );
+  const botAudience = await rpc("recipients.audienceStatus", {
+    id: list.id,
+    transport: "bot",
+  });
+  const accountAudience = await rpc("recipients.audienceStatus", {
+    id: list.id,
+    transport: "mtproto",
+  });
+  check(
+    "audience_preflight_has_sender_scoped_permissions",
+    botAudience.total === 2 &&
+      botAudience.allowed === 2 &&
+      accountAudience.total === 2 &&
+      accountAudience.allowed === 0 &&
+      accountAudience.needsConfirmation === 2 &&
+      !/recipient|chatIds|phone/.test(JSON.stringify(botAudience))
+  );
   const campaign = await rpc(
     "broadcast.create",
     {
@@ -441,6 +458,48 @@ async function run() {
     "concurrent_cron_has_no_duplicates",
     final.dryRun === 2 && final.accepted === 0 && logs.length === 2,
     { ...progressCounts(final), logs: logs.length }
+  );
+  const cancelledCampaign = await rpc(
+    "broadcast.create",
+    {
+      name: `Cloudflare stop CI ${randomUUID()}`,
+      message: "Synthetic cancellation check",
+      parseMode: "None",
+      delaySeconds: 1,
+      isDryRun: true,
+      recipientListId: list.id,
+      requestKey: randomUUID(),
+      approved: true,
+    },
+    true
+  );
+  await rpc("broadcast.launch", { id: cancelledCampaign.id }, true);
+  const stopped = await rpc(
+    "broadcast.cancel",
+    { id: cancelledCampaign.id },
+    true
+  );
+  const stoppedProgress = await rpc("broadcast.getProgress", {
+    id: cancelledCampaign.id,
+  });
+  check(
+    "stop_acknowledged_and_verified_by_progress",
+    stopped.acknowledged === true &&
+      stopped.status === "stopped" &&
+      stoppedProgress.status === "stopped" &&
+      stoppedProgress.cancelled === 2 &&
+      stoppedProgress.pending === 0 &&
+      stoppedProgress.inflight === 0 &&
+      stoppedProgress.accepted === 0
+  );
+  const stoppedAgain = await rpc(
+    "broadcast.cancel",
+    { id: cancelledCampaign.id },
+    true
+  );
+  check(
+    "repeated_stop_is_idempotent",
+    stoppedAgain.acknowledged === true && stoppedAgain.status === "stopped"
   );
   const ready = await fetch(`${base}/readyz`, { signal: signal() });
   check(

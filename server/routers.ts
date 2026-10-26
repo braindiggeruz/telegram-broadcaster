@@ -13,6 +13,7 @@ import { LOGIN_PHONE_ERROR, normalizeLoginPhone } from "../shared/loginPhone";
 import { createCampaign, launchCampaign, enrichedCampaign } from "./campaigns";
 import { draftRouter } from "./drafts";
 import { mediaRouter } from "./media";
+import { getAudienceStatus } from "./audienceStatus";
 import { automationRouter } from "./automation";
 import { operationsRouter } from "./operations";
 import { dashboard } from "./dashboard";
@@ -188,6 +189,11 @@ const recipientsRouter = router({
   list: protectedProcedure.query(({ ctx }) =>
     db.getRecipientLists(ctx.user.id)
   ),
+  audienceStatus: protectedProcedure
+    .input(idInput.extend({ transport: z.enum(["bot", "mtproto"]) }))
+    .query(({ ctx, input }) =>
+      getAudienceStatus(ctx.user.id, input.transport, input.id)
+    ),
   get: protectedProcedure
     .input(idInput)
     .query(({ ctx, input }) => db.getRecipientList(input.id, ctx.user.id)),

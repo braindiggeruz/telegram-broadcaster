@@ -89,7 +89,7 @@ export function classifyMtprotoError(error: unknown): DeliveryError | Error {
   const code = e?.errorMessage;
   if (!code) return new Error("MTPROTO_RESULT_UNKNOWN");
   if (
-    /^INPUT_USER_DEACTIVATED$|^USER_PRIVACY_RESTRICTED$|^USER_IS_BLOCKED$|^YOU_BLOCKED_USER$|^PEER_ID_INVALID$|^USERNAME_NOT_OCCUPIED$|^CHAT_WRITE_FORBIDDEN$/.test(
+    /^INPUT_USER_DEACTIVATED$|^USER_PRIVACY_RESTRICTED$|^USER_IS_BLOCKED$|^YOU_BLOCKED_USER$|^PEER_ID_INVALID$|^USERNAME_NOT_OCCUPIED$|^PHONE_NOT_OCCUPIED$|^CHAT_WRITE_FORBIDDEN$/.test(
       code
     )
   )
@@ -250,6 +250,51 @@ async function uploadPhoto(
   });
 }
 
+async function resolvePhonePeer(
+  client: TelegramClient,
+  phone: string,
+  ensureActive: () => void
+): Promise<Api.TypeInputPeer> {
+  if (!/^\+[1-9]\d{6,14}$/.test(phone))
+    throw new DeliveryError("recipient", "PHONE_NUMBER_INVALID");
+  ensureActive();
+  // This official lookup respects the recipient's phone-discovery privacy and
+  // does not import, add, or remove anything from the sender's contact book.
+  const resolved = await client.invoke(
+    new Api.contacts.ResolvePhone({ phone })
+  );
+  ensureActive();
+  if (
+    !(resolved instanceof Api.contacts.ResolvedPeer) ||
+    !(resolved.peer instanceof Api.PeerUser) ||
+    !bigInt.isInstance(resolved.peer.userId) ||
+    resolved.peer.userId.lesserOrEquals(0) ||
+    !Array.isArray(resolved.users)
+  )
+    throw new DeliveryError("recipient", "MTPROTO_PHONE_NOT_RESOLVED");
+  const peerId = resolved.peer.userId.toString();
+  const user = resolved.users.find(
+    (candidate): candidate is Api.User =>
+      candidate instanceof Api.User &&
+      bigInt.isInstance(candidate.id) &&
+      candidate.id.toString() === peerId
+  );
+  if (!user || user.deleted || user.min)
+    throw new DeliveryError("recipient", "MTPROTO_PHONE_NOT_RESOLVED");
+  if (user.self) return new Api.InputPeerSelf();
+  if (
+    user.accessHash === undefined ||
+    user.accessHash === null ||
+    !bigInt.isInstance(user.accessHash) ||
+    user.accessHash.isZero()
+  )
+    throw new DeliveryError("recipient", "MTPROTO_PHONE_ACCESS_HASH_MISSING");
+  return new Api.InputPeerUser({
+    userId: user.id,
+    accessHash: user.accessHash,
+  });
+}
+
 async function sendMtproto(request: DeliveryRequest) {
   const session = await getMtprotoSession(request.ownerId);
   if (!session?.isActive || !session.sessionString)
@@ -286,16 +331,23 @@ async function sendMtproto(request: DeliveryRequest) {
     const operation = (async () => {
       await client.connect();
       ensureActive();
-      let target: string | ReturnType<typeof bigInt>;
-      if (request.recipient.startsWith("chat:"))
-        target = bigInt(request.recipient.slice(5));
-      else if (request.recipient.startsWith("username:"))
-        target = `@${request.recipient.slice(9)}`;
-      else target = request.recipient.slice(6); // Existing contacts only; never import unknown phones.
       let peer: Api.TypeInputPeer;
       try {
-        peer = await client.getInputEntity(target);
+        if (request.recipient.startsWith("phone:")) {
+          peer = await resolvePhonePeer(
+            client,
+            request.recipient.slice(6),
+            ensureActive
+          );
+        } else {
+          const target = request.recipient.startsWith("chat:")
+            ? bigInt(request.recipient.slice(5))
+            : `@${request.recipient.slice(9)}`;
+          peer = await client.getInputEntity(target);
+        }
       } catch (e) {
+        ensureActive();
+        if (e instanceof DeliveryError) throw e;
         const classified = classifyMtprotoError(e);
         if (classified instanceof DeliveryError) throw classified;
         if (

@@ -1,5 +1,10 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { trpc } from "@/lib/trpc";
+import {
+  confirmCampaignStop,
+  deliveryDetail,
+  type StopFeedback,
+} from "@/lib/campaignFeedback";
 import { Link, useParams } from "wouter";
 import { Button } from "@/components/ui/button";
 import StatusBadge, { terminalStatuses } from "@/components/StatusBadge";
@@ -15,6 +20,9 @@ export default function BroadcastReport({
   const utils = trpc.useUtils();
   const [offset, setOffset] = useState(0);
   const [exporting, setExporting] = useState(false);
+  const [checkingStop, setCheckingStop] = useState(false);
+  const [stopFeedback, setStopFeedback] = useState<StopFeedback | null>(null);
+  const stopGuard = useRef(false);
   const params = useParams<{ id: string }>();
   const id = Number(params.id);
   const validId = Number.isSafeInteger(id) && id > 0;
@@ -46,11 +54,34 @@ export default function BroadcastReport({
   const accountCancel = trpc.mtproto.cancelBroadcast.useMutation();
   const query = transport === "bot" ? bot : account;
   const logsQuery = transport === "bot" ? botLogs : accountLogs;
-  const progress = (transport === "bot" ? botProgress : accountProgress).data;
+  const progressQuery = transport === "bot" ? botProgress : accountProgress;
+  const progress = progressQuery.data;
   const bc = query.data;
   const logs = logsQuery.data?.items ?? [];
   const total = logsQuery.data?.total ?? 0;
   const status = progress?.status ?? bc?.status ?? "pending";
+  async function cancel(checkOnly = false) {
+    if (!validId || stopGuard.current) return;
+    stopGuard.current = true;
+    setCheckingStop(true);
+    try {
+      const feedback = await confirmCampaignStop({
+        request: checkOnly
+          ? undefined
+          : () =>
+              (transport === "bot" ? botCancel : accountCancel).mutateAsync({
+                id,
+              }),
+        read: async () =>
+          (await progressQuery.refetch({ throwOnError: true })).data,
+      });
+      setStopFeedback(feedback);
+      toast[feedback.tone](feedback.message);
+    } finally {
+      stopGuard.current = false;
+      setCheckingStop(false);
+    }
+  }
   if (!validId)
     return (
       <div className="p-8">
@@ -165,33 +196,38 @@ export default function BroadcastReport({
               disabled={
                 botCancel.isPending ||
                 accountCancel.isPending ||
+                checkingStop ||
                 status === "stopping"
               }
-              onClick={async () => {
-                try {
-                  await (
-                    transport === "bot" ? botCancel : accountCancel
-                  ).mutateAsync({ id });
-                  toast.info("Запрос остановки принят");
-                  void query.refetch();
-                } catch (error) {
-                  toast.error(
-                    error instanceof Error ? error.message : "Ошибка остановки"
-                  );
-                }
-              }}
+              onClick={() => void cancel()}
             >
               <Square className="h-4 w-4" />
-              Остановить
+              {checkingStop ? "Проверяем остановку…" : "Остановить"}
             </Button>
           )}
         </div>
       </div>
+      {stopFeedback && (
+        <div role="status" className="space-y-2 text-sm">
+          <p>{stopFeedback.message}</p>
+          {stopFeedback.uncertain && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={checkingStop}
+              onClick={() => void cancel(true)}
+            >
+              Проверить состояние
+            </Button>
+          )}
+        </div>
+      )}
       <div className="flex items-center gap-3">
         <StatusBadge status={status} />
-        {bc.isDryRun && (
-          <span className="text-xs text-muted-foreground">
-            Проверка без отправки
+        {(progress?.isDryRun ?? bc.isDryRun) && (
+          <span className="inline-flex rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-xs font-medium text-amber-300">
+            Без отправки
           </span>
         )}
       </div>
@@ -217,6 +253,12 @@ export default function BroadcastReport({
         Успех API не подтверждает прочтение. Неопределённые результаты не
         повторяются автоматически.
       </p>
+      {!!additional?.suppressed && (
+        <p className="text-xs text-muted-foreground">
+          Исключённые получатели пропущены без отправки. Причины указаны в
+          журнале ниже.
+        </p>
+      )}
       <section className="rounded-xl border border-border bg-card p-5">
         <h2 className="font-medium text-sm mb-3">Утверждённое сообщение</h2>
         <MessagePreview
@@ -274,7 +316,7 @@ export default function BroadcastReport({
                         />
                       </td>
                       <td className="p-3 max-w-sm break-words">
-                        {log.errorMessage ?? "—"}
+                        {deliveryDetail(log.errorMessage)}
                       </td>
                       <td className="p-3 whitespace-nowrap">
                         {new Date(log.sentAt).toLocaleString("ru-RU")}

@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { Link, useLocation } from "wouter";
 import { trpc } from "@/lib/trpc";
+import { confirmCampaignStop, type StopFeedback } from "@/lib/campaignFeedback";
 import { useServerDraft, type ParseMode } from "@/hooks/useServerDraft";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,7 +11,14 @@ import PhotoAttachmentPicker, {
 } from "@/components/PhotoAttachmentPicker";
 import { PHOTO_CAPTION_MAX_LENGTH } from "@shared/media";
 import StatusBadge, { terminalStatuses } from "@/components/StatusBadge";
-import { Loader2, Play, Square, ArrowRight, FlaskConical } from "lucide-react";
+import {
+  Loader2,
+  Play,
+  Square,
+  ArrowLeft,
+  ArrowRight,
+  FlaskConical,
+} from "lucide-react";
 import { toast } from "sonner";
 
 const selectClass =
@@ -29,6 +37,7 @@ export default function CampaignForm({
 }: {
   transport: "bot" | "mtproto";
 }) {
+  const utils = trpc.useUtils();
   const [, navigate] = useLocation();
   const draft = useServerDraft(transport);
   const [name, setName] = useState(
@@ -42,6 +51,10 @@ export default function CampaignForm({
     initialId(transport)
   );
   const [launching, setLaunching] = useState(false);
+  const [checkingStop, setCheckingStop] = useState(false);
+  const [returningToSettings, setReturningToSettings] = useState(false);
+  const [stopFeedback, setStopFeedback] = useState<StopFeedback | null>(null);
+  const stopGuard = useRef(false);
   const [photoBlocked, setPhotoBlocked] = useState(false);
   const [pendingPhoto, setPendingPhoto] = useState<PreviewPhoto | null>(null);
   const pendingKey = useRef<{ fingerprint: string; key: string } | null>(null);
@@ -71,6 +84,10 @@ export default function CampaignForm({
   const connected =
     transport === "bot" ? bot.data?.isValid : account.data?.isActive;
   const selected = lists.data?.find(list => list.id === Number(listId));
+  const audienceStatus = trpc.recipients.audienceStatus.useQuery(
+    { id: Number(listId) || 0, transport },
+    { enabled: !!selected, refetchInterval: 15000 }
+  );
   const rootPath = transport === "bot" ? "/launch" : "/user-broadcast";
   const reportPath =
     transport === "bot"
@@ -88,6 +105,19 @@ export default function CampaignForm({
   const hasPhoto =
     transport === "mtproto" && (!!draft.photoId || !!pendingPhoto);
   const messageLimit = hasPhoto ? PHOTO_CAPTION_MAX_LENGTH : 4096;
+  const launchHint = !listId
+    ? "Выберите список в поле «Аудитория»."
+    : !dryRun && !connected
+      ? "Подключите выбранного отправителя для реальной отправки."
+      : !dryRun && audienceStatus.error
+        ? "Не удалось проверить аудиторию. Повторите проверку ниже."
+        : !dryRun && !audienceStatus.data
+          ? "Проверяем аудиторию…"
+          : !dryRun && audienceStatus.data?.allowed === 0
+            ? "Нет подтверждения для выбранного отправителя. Проверьте согласие аудитории."
+            : !dryRun && !approved
+              ? "Подтвердите картинку или текст, выбранную аудиторию и реальную отправку."
+              : "";
   function remember(id: number | null) {
     setActiveId(id);
     try {
@@ -95,6 +125,33 @@ export default function CampaignForm({
       else localStorage.removeItem(`tg-sender:active:${transport}`);
     } catch {}
     navigate(id ? `${rootPath}?campaign=${id}` : rootPath, { replace: true });
+  }
+  async function backToSettings() {
+    if (!activeId || returningToSettings) return;
+    setReturningToSettings(true);
+    try {
+      const campaign = await (
+        transport === "bot" ? utils.broadcast.get : utils.mtproto.getBroadcast
+      ).fetch({ id: activeId });
+      if (campaign) {
+        setName(campaign.name);
+        setListId(
+          campaign.recipientListId ? String(campaign.recipientListId) : ""
+        );
+        setDelay(campaign.delaySeconds);
+        setDryRun(campaign.isDryRun);
+      }
+    } catch {
+      toast.info(
+        "Не удалось восстановить параметры кампании. Сохранённый текст и картинка остаются в черновике."
+      );
+    } finally {
+      // Reopen settings only; the current server draft and old campaign stay intact.
+      setApproved(false);
+      setStopFeedback(null);
+      remember(null);
+      setReturningToSettings(false);
+    }
   }
   async function launch() {
     if (photoBlocked) return;
@@ -152,16 +209,26 @@ export default function CampaignForm({
       setLaunching(false);
     }
   }
-  async function cancel() {
-    if (!activeId) return;
+  async function cancel(checkOnly = false) {
+    if (!activeId || stopGuard.current) return;
+    stopGuard.current = true;
+    setCheckingStop(true);
     try {
-      await (transport === "bot" ? botCancel : accountCancel).mutateAsync({
-        id: activeId,
+      const feedback = await confirmCampaignStop({
+        request: checkOnly
+          ? undefined
+          : () =>
+              (transport === "bot" ? botCancel : accountCancel).mutateAsync({
+                id: activeId,
+              }),
+        read: async () =>
+          (await progressQuery.refetch({ throwOnError: true })).data,
       });
-      toast.info("Запрос остановки принят. Ожидаем подтверждение обработчика.");
-      void progressQuery.refetch();
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Ошибка остановки");
+      setStopFeedback(feedback);
+      toast[feedback.tone](feedback.message);
+    } finally {
+      stopGuard.current = false;
+      setCheckingStop(false);
     }
   }
   return (
@@ -191,6 +258,11 @@ export default function CampaignForm({
                     Получаем состояние…
                   </span>
                 )}
+                {progress?.isDryRun && (
+                  <span className="ml-2 inline-flex rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-xs font-medium text-amber-300">
+                    Без отправки
+                  </span>
+                )}
               </div>
             </div>
             <div className="flex gap-2">
@@ -207,20 +279,37 @@ export default function CampaignForm({
                   disabled={
                     botCancel.isPending ||
                     accountCancel.isPending ||
+                    checkingStop ||
                     progress?.status === "stopping"
                   }
                   onClick={() => void cancel()}
                 >
                   <Square className="h-3 w-3" />
-                  Остановить
+                  {checkingStop ? "Проверяем остановку…" : "Остановить"}
                 </Button>
               )}
             </div>
           </div>
           {progressQuery.error && (
             <p role="alert" className="text-sm text-red-400">
-              {progressQuery.error.message}
+              Не удалось обновить состояние кампании.
             </p>
+          )}
+          {stopFeedback && (
+            <div role="status" className="space-y-2 text-sm">
+              <p>{stopFeedback.message}</p>
+              {stopFeedback.uncertain && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={checkingStop}
+                  onClick={() => void cancel(true)}
+                >
+                  Проверить состояние
+                </Button>
+              )}
+            </div>
           )}
           {progress && (
             <>
@@ -273,9 +362,22 @@ export default function CampaignForm({
               )}
             </>
           )}
+          {!!current?.suppressed && (
+            <p className="text-xs text-muted-foreground">
+              Исключённые получатели пропущены без отправки. Причины — в отчёте.
+            </p>
+          )}
           {!active && (
-            <Button size="sm" variant="outline" onClick={() => remember(null)}>
-              Подготовить следующую кампанию
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={returningToSettings || checkingStop}
+              onClick={() => void backToSettings()}
+            >
+              <ArrowLeft className="h-3 w-3" />
+              {returningToSettings
+                ? "Открываем настройки…"
+                : "Назад к настройкам рассылки"}
             </Button>
           )}
         </section>
@@ -481,6 +583,62 @@ export default function CampaignForm({
                   Отписки и запреты проверяются заново перед каждой отправкой.
                 </p>
               </div>
+              {selected && (
+                <div
+                  className="rounded-lg border border-border p-3 space-y-2 text-sm"
+                  aria-live="polite"
+                >
+                  {audienceStatus.error ? (
+                    <>
+                      <p>
+                        Не удалось проверить аудиторию. Реальная отправка
+                        недоступна до проверки.
+                      </p>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={audienceStatus.isFetching}
+                        onClick={() => void audienceStatus.refetch()}
+                      >
+                        Повторить проверку аудитории
+                      </Button>
+                    </>
+                  ) : !audienceStatus.data ? (
+                    <p>Проверяем аудиторию…</p>
+                  ) : (
+                    <>
+                      <p>
+                        Подтверждено: {audienceStatus.data.allowed} · Требует
+                        подтверждения: {audienceStatus.data.needsConfirmation} ·
+                        Отписались или исключены: {audienceStatus.data.optedOut}{" "}
+                        · Не поддерживаются: {audienceStatus.data.unsupported}
+                      </p>
+                      {audienceStatus.data.identityChanged > 0 && (
+                        <p className="text-amber-400">
+                          После подключения или смены аккаунта подтвердите
+                          согласие аудитории для этого отправителя. Это не
+                          связано с контактами Telegram.
+                        </p>
+                      )}
+                      {audienceStatus.data.needsConfirmation > 0 && (
+                        <Link
+                          href="/recipients"
+                          className="text-primary underline"
+                        >
+                          Открыть аудиторию
+                        </Link>
+                      )}
+                    </>
+                  )}
+                  {dryRun && (
+                    <p className="text-xs text-muted-foreground">
+                      Без отправки: проверка не добавляет согласий и не
+                      отправляет сообщения.
+                    </p>
+                  )}
+                </div>
+              )}
               <label className="flex gap-3 items-start rounded-lg bg-muted/30 p-3 text-sm">
                 <input
                   type="checkbox"
@@ -517,6 +675,9 @@ export default function CampaignForm({
               )}
               <Button
                 className="w-full"
+                aria-describedby={
+                  launchHint ? "campaign-launch-hint" : undefined
+                }
                 disabled={
                   launching ||
                   !draft.ready ||
@@ -529,7 +690,12 @@ export default function CampaignForm({
                   draft.message.length > messageLimit ||
                   !Number.isFinite(delay) ||
                   delay < (transport === "bot" ? 1 : 3) ||
-                  (!dryRun && (!approved || !connected))
+                  (!dryRun &&
+                    (!approved ||
+                      !connected ||
+                      !audienceStatus.data ||
+                      !!audienceStatus.error ||
+                      audienceStatus.data.allowed === 0))
                 }
                 onClick={() => void launch()}
               >
@@ -542,6 +708,15 @@ export default function CampaignForm({
                   ? "Проверить кампанию"
                   : "Запустить утверждённую кампанию"}
               </Button>
+              {launchHint && (
+                <p
+                  id="campaign-launch-hint"
+                  role="status"
+                  className="text-sm text-amber-400"
+                >
+                  {launchHint}
+                </p>
+              )}
             </section>
           </div>
         </>

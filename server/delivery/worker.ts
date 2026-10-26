@@ -257,17 +257,42 @@ async function processClaim(
     return;
   }
   const controller = new AbortController();
+  const dispatchTimeoutMs = Math.max(
+    100,
+    nonnegativeSetting(options.dispatchTimeoutMs, 30000)
+  );
   const timeout = setTimeout(
     () => controller.abort(new Error("DISPATCH_TIMEOUT")),
-    Math.max(100, nonnegativeSetting(options.dispatchTimeoutMs, 30000))
+    dispatchTimeoutMs
   );
   const abortOnConnectionLoss = () =>
     controller.abort(new Error("DATABASE_LOCK_LOST"));
   client.on("error", abortOnConnectionLoss);
   let result: { messageId?: string } | undefined;
   let error: unknown;
+  let phoneLookupLease: string | null = null;
   try {
     if (connectionLost()) throw new Error("DATABASE_LOCK_LOST");
+    if (claim.kind === "mtproto" && claim.recipient.startsWith("phone:")) {
+      // Reserve before an external lookup: if this isolate/DB session dies,
+      // another worker still observes a gap after the last possible lookup.
+      // Use text to preserve PostgreSQL timestamp precision for the CAS below.
+      const reserved = await client.query<{ lease_until: string }>(
+        `WITH lease AS (
+           SELECT clock_timestamp()+$2*interval '1 millisecond' AS until
+         )
+         UPDATE sender_controls s
+            SET next_send_at=GREATEST(s.next_send_at,lease.until),updated_at=now()
+           FROM lease WHERE s.sender_key=$1
+         RETURNING lease.until::text AS lease_until`,
+        [claim.sender_key, dispatchTimeoutMs + 3000]
+      );
+      if (!reserved.rows[0]?.lease_until)
+        throw new Error("PHONE_LOOKUP_LEASE_UNAVAILABLE");
+      phoneLookupLease = reserved.rows[0].lease_until;
+    }
+    if (connectionLost() || controller.signal.aborted)
+      throw new Error("DISPATCH_TIMEOUT_OR_LOCK_LOST");
     result = await options.transport.send({
       ownerId: Number(claim.owner_id),
       kind: claim.kind,
@@ -297,8 +322,11 @@ async function processClaim(
       Number(claim.delay_seconds)
     );
     await client.query(
-      `UPDATE sender_controls SET next_send_at=GREATEST(next_send_at,now()+$2*interval '1 second'),updated_at=now() WHERE sender_key=$1`,
-      [claim.sender_key, interval]
+      `UPDATE sender_controls SET next_send_at=GREATEST(
+         CASE WHEN $3::timestamptz IS NOT NULL AND next_send_at=$3::timestamptz
+              THEN now() ELSE next_send_at END,
+         now()+$2*interval '1 second'),updated_at=now() WHERE sender_key=$1`,
+      [claim.sender_key, interval, phoneLookupLease]
     );
     if (result) {
       await finishClaim(client, claim, "accepted", null, result.messageId);
