@@ -24,6 +24,7 @@ import {
   signInWithCode,
   signInWithPassword,
   logoutSession,
+  getAuthStatus,
 } from "./mtproto";
 const idInput = z.object({ id: z.number().int().positive() });
 const pageInput = idInput.extend({
@@ -318,6 +319,9 @@ const mtprotoRouter = router({
   getSession: protectedProcedure.query(async ({ ctx }) =>
     mtprotoSessionDto(await db.getMtprotoSession(ctx.user.id))
   ),
+  getAuthStatus: protectedProcedure.query(({ ctx }) =>
+    getAuthStatus(ctx.user.id)
+  ),
   sendCode: protectedProcedure
     .input(
       z.object({
@@ -330,11 +334,20 @@ const mtprotoRouter = router({
             ctx.addIssue({ code: "custom", message: LOGIN_PHONE_ERROR });
             return z.NEVER;
           }),
+        resend: z.boolean().default(false),
       })
     )
     .mutation(async ({ ctx, input }) => {
-      await sendPhoneCode(ctx.user.id, input.phone);
-      return { sent: true };
+      const result = await sendPhoneCode(
+        ctx.user.id,
+        input.phone,
+        input.resend
+      );
+      return {
+        sent: !result.reused,
+        resumed: result.reused === true,
+        status: await getAuthStatus(ctx.user.id),
+      };
     }),
   signIn: protectedProcedure
     .input(z.object({ code: z.string().regex(/^\d{4,8}$/) }))
