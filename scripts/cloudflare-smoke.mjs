@@ -635,7 +635,7 @@ export default {
   try {
     await cancellationGuard.query(
       "SELECT pg_advisory_lock(hashtextextended($1,0))",
-      [`${cancelledCampaign.userId}:bot`]
+      [`tg-sender:${cancelledCampaign.userId}:bot`]
     );
     await rpc("broadcast.launch", { id: cancelledCampaign.id }, true);
     const stopped = await rpc(
