@@ -2,6 +2,7 @@ import { Badge } from "@/components/ui/badge";
 export const statusLabels: Record<string, string> = {
   pending: "Подготовлена",
   queued: "В очереди",
+  retry_pending: "Ожидает повтора",
   running: "Выполняется",
   completed: "Завершена",
   failed: "Ошибка",

@@ -110,6 +110,122 @@ describe.skipIf(!url)("durable delivery on PostgreSQL", () => {
       ...extra,
     });
 
+  it("leaves the queue untouched when an HTTP kick cannot fit a complete attempt", async () => {
+    await prepare({ recipients: ["101"] });
+    const send = vi.fn(async () => ({ messageId: "must-never-send" }));
+    expect(
+      await worker(
+        { send },
+        { dispatchTimeoutMs: 20_000, dispatchDeadlineMs: Date.now() + 22_000 }
+      )
+    ).toEqual({ worked: false });
+    expect(send).not.toHaveBeenCalled();
+    expect(
+      (await pool.query("SELECT count(*)::int AS count FROM delivery_attempts"))
+        .rows[0].count
+    ).toBe(0);
+    expect(await service.getProgress(base.ownerId, "bot", 1)).toMatchObject({
+      pending: 1,
+      inflight: 0,
+      unknown: 0,
+    });
+  });
+
+  it.each(["fresh_guard", "phone_lease"])(
+    "returns an undispatched claim without consuming retries when %s exhausts the HTTP window",
+    async stage => {
+      await prepare({ kind: "mtproto", recipients: ["phone:+19990000000"] });
+      const before = (await pool.query("SELECT random_id FROM deliveries"))
+        .rows[0];
+      const pacingBefore = (
+        await pool.query(
+          "SELECT next_send_at::text AS deadline FROM sender_controls"
+        )
+      ).rows[0].deadline;
+      let now = Date.now();
+      const deadline = now + 28_000;
+      const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+      let injected = false;
+      const observedPool = {
+        query: pool.query.bind(pool),
+        connect: async () => {
+          const client = await pool.connect();
+          const originalQuery = client.query;
+          const originalRelease = client.release;
+          client.query = (async (...args: unknown[]) => {
+            const result = await (
+              originalQuery.bind(client) as (
+                ...values: unknown[]
+              ) => Promise<unknown>
+            )(...args);
+            const sql = args[0];
+            if (
+              !injected &&
+              typeof sql === "string" &&
+              sql.includes(
+                stage === "fresh_guard"
+                  ? "SELECT c.cancel_requested_at"
+                  : "RETURNING lease.until::text"
+              )
+            ) {
+              injected = true;
+              now += 6000;
+            }
+            return result;
+          }) as typeof client.query;
+          client.release = ((...args: Parameters<typeof client.release>) => {
+            client.query = originalQuery;
+            client.release = originalRelease;
+            originalRelease.apply(client, args);
+          }) as typeof client.release;
+          return client;
+        },
+      } as unknown as Pool;
+      const send = vi.fn(async () => ({ messageId: "must-never-send" }));
+      try {
+        await worker(
+          { send },
+          {
+            pool: observedPool,
+            dispatchTimeoutMs: 20_000,
+            dispatchDeadlineMs: deadline,
+          }
+        );
+      } finally {
+        clock.mockRestore();
+      }
+      expect(injected).toBe(true);
+      expect(send).not.toHaveBeenCalled();
+      expect(
+        (
+          await pool.query(
+            "SELECT count(*)::int AS count FROM delivery_attempts"
+          )
+        ).rows[0].count
+      ).toBe(0);
+      expect(
+        (await pool.query("SELECT random_id,attempt_id FROM deliveries"))
+          .rows[0]
+      ).toEqual({ random_id: before.random_id, attempt_id: null });
+      expect(
+        (
+          await pool.query(
+            "SELECT next_send_at::text AS deadline FROM sender_controls"
+          )
+        ).rows[0].deadline
+      ).toBe(pacingBefore);
+      expect(
+        await service.getProgress(base.ownerId, "mtproto", 1)
+      ).toMatchObject({ pending: 1, inflight: 0, unknown: 0 });
+      // The normal durable worker can still send the same logical message once.
+      await worker({ send });
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(
+        await service.getProgress(base.ownerId, "mtproto", 1)
+      ).toMatchObject({ accepted: 1, pending: 0 });
+    }
+  );
+
   it("reserves a bounded phone-lookup lease and releases only its own lease to normal pacing", async () => {
     await prepare({ kind: "mtproto", recipients: ["phone:+19990000000"] });
     const send = vi.fn(async () => {
@@ -322,6 +438,96 @@ describe.skipIf(!url)("durable delivery on PostgreSQL", () => {
     expect(new Date(control.rows[0].cooldown_until).getTime()).toBeGreaterThan(
       Date.now() + 100000
     );
+  });
+
+  it.each([0, 3])(
+    "mandatory waits do not exhaust transient retries after %s previous transient failures",
+    async priorTransientFailures => {
+      await prepare({ recipients: ["101"] });
+      const delivery = (await pool.query("SELECT id,random_id FROM deliveries"))
+        .rows[0];
+      for (const code of [
+        "FLOOD_WAIT",
+        "FLOOD_WAIT_120",
+        "FLOOD_PREMIUM_WAIT_120",
+        "FLOOD_TEST_PHONE_WAIT_120",
+        "SLOWMODE_WAIT_120",
+        "BOT_RATE_LIMIT",
+        "CONTACT_FREQUENCY_WAIT",
+        ...Array(priorTransientFailures).fill("MTPROTO_RESOLUTION_UNAVAILABLE"),
+      ]) {
+        await pool.query(
+          "INSERT INTO delivery_attempts(id,delivery_id,state,error_code,completed_at) VALUES($1,$2,'deferred',$3,now())",
+          [randomUUID(), delivery.id, code]
+        );
+      }
+      const send = vi.fn(async () => {
+        throw new DeliveryError(
+          "transient",
+          "MTPROTO_RESOLUTION_UNAVAILABLE",
+          60
+        );
+      });
+      await worker({ send });
+      expect(await service.getProgress(base.ownerId, "bot", 1)).toMatchObject({
+        pending: 1,
+        failed: 0,
+        retryPending: 1,
+        accepted: 0,
+      });
+      expect(
+        (await pool.query("SELECT last_error,random_id FROM deliveries"))
+          .rows[0]
+      ).toMatchObject({
+        last_error: "MTPROTO_RESOLUTION_UNAVAILABLE",
+        random_id: delivery.random_id,
+      });
+      const accepted = vi.fn(async request => {
+        expect(request.randomId).toBe(delivery.random_id);
+        return { messageId: "synthetic-recovered" };
+      });
+      await unpace();
+      await pool.query(
+        "UPDATE deliveries SET available_at=now()-interval '1 second'"
+      );
+      await worker({ send: accepted });
+      expect(accepted).toHaveBeenCalledTimes(1);
+      expect(await service.getProgress(base.ownerId, "bot", 1)).toMatchObject({
+        accepted: 1,
+        pending: 0,
+        failed: 0,
+        status: "completed",
+      });
+    }
+  );
+
+  it("still exhausts the fifth confirmed-unsent transient failure", async () => {
+    await prepare({ recipients: ["101"] });
+    const delivery = (await pool.query("SELECT id FROM deliveries")).rows[0];
+    for (let i = 0; i < 4; i++) {
+      await pool.query(
+        "INSERT INTO delivery_attempts(id,delivery_id,state,error_code,completed_at) VALUES($1,$2,'deferred','MTPROTO_RESOLUTION_UNAVAILABLE',now())",
+        [randomUUID(), delivery.id]
+      );
+    }
+    const send = vi.fn(async () => {
+      throw new DeliveryError(
+        "transient",
+        "MTPROTO_RESOLUTION_UNAVAILABLE",
+        60
+      );
+    });
+    await worker({ send });
+    expect(await service.getProgress(base.ownerId, "bot", 1)).toMatchObject({
+      failed: 1,
+      pending: 0,
+      accepted: 0,
+    });
+    expect(
+      (await pool.query("SELECT last_error FROM deliveries")).rows[0].last_error
+    ).toBe("UNSENT_RETRY_EXHAUSTED");
+    await worker({ send });
+    expect(send).toHaveBeenCalledTimes(1);
   });
 
   it("limits slowmode to its recipient and allows another chat to proceed", async () => {

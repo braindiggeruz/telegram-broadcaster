@@ -5,7 +5,8 @@ import { httpServerHandler } from "cloudflare:node";
 import { createApp, securityHeaders } from "../server/_core/app";
 import { runWithDatabaseScope } from "../server/connection";
 import { assertSecurityConfiguration } from "../server/security/config";
-import { runScheduledBatch } from "../server/cloudflareScheduled";
+import { runImmediateDeliveryBatch, runScheduledBatch } from "../server/cloudflareScheduled";
+import { shouldKickDelivery } from "../server/cloudflareKick";
 
 interface WorkerEnvironment {
   ASSETS: { fetch(request: Request): Promise<Response> };
@@ -111,11 +112,20 @@ export default {
       // Workers populates process.env from this deployment's bindings. Do not
       // copy values into mutable global state shared by concurrent invocations.
       assertSecurityConfiguration();
-      return await runWithDatabaseScope(async () =>
+      const response = await runWithDatabaseScope(async () =>
         consumeResponse(
           await handler.fetch(trustedIngressRequest(request), env, context)
         )
       );
+      // Leave the request's AsyncLocalStorage scope first: background work must
+      // own a fresh pool rather than inherit the pool just closed above.
+      if (await shouldKickDelivery(request, response))
+        context.waitUntil(
+          runImmediateDeliveryBatch().catch(() => {
+            console.error("CLOUD_HTTP_KICK_FAILED");
+          })
+        );
+      return response;
     } catch {
       console.error("WORKER_REQUEST_FAILED");
       return withSecurityHeaders(

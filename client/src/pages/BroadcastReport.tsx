@@ -5,6 +5,7 @@ import {
   campaignQueueNotice,
   confirmCampaignStop,
   deliveryDetail,
+  deliveryDisplayStatus,
   formatCampaignTime,
   type CampaignQueueProgress,
   type StopFeedback,
@@ -334,14 +335,15 @@ export default function BroadcastReport({
                       </td>
                       <td className="p-3">
                         <StatusBadge
-                          status={
+                          status={deliveryDisplayStatus(
                             item.status ??
-                            (bc.isDryRun
-                              ? "dry_run"
-                              : log.success
-                                ? "accepted"
-                                : "failed")
-                          }
+                              (bc.isDryRun
+                                ? "dry_run"
+                                : log.success
+                                  ? "accepted"
+                                  : "failed"),
+                            log.errorMessage
+                          )}
                         />
                       </td>
                       <td className="p-3 max-w-sm break-words">

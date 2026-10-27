@@ -38,6 +38,18 @@ function nonnegativeSetting(
     : fallback;
 }
 
+function dispatchWindowOpen(options: WorkerOptions) {
+  if (options.dispatchDeadlineMs === undefined) return true;
+  const timeout = Math.max(
+    100,
+    nonnegativeSetting(options.dispatchTimeoutMs, 30000)
+  );
+  return (
+    Number.isFinite(options.dispatchDeadlineMs) &&
+    Date.now() + timeout + 3000 <= options.dispatchDeadlineMs
+  );
+}
+
 /** Health contains no account, content, or credential data. */
 export async function recordWorkerHeartbeat(
   pool: Pool,
@@ -180,6 +192,37 @@ async function finishClaim(
   );
 }
 
+/** No transport call occurred: retain the same logical message and retry budget. */
+async function deferUndispatchedClaim(
+  client: PoolClient,
+  claim: Claim,
+  phoneLease?: { until: string; previous: string }
+) {
+  await client.query("BEGIN");
+  try {
+    const returned = await client.query(
+      `UPDATE deliveries SET state='pending',attempt_id=NULL,updated_at=now()
+       WHERE id=$1 AND attempt_id=$2 AND state='inflight' RETURNING id`,
+      [claim.id, claim.attempt_id]
+    );
+    if (!returned.rowCount) throw new Error("DELIVERY_CLAIM_LOST");
+    await client.query(
+      "DELETE FROM delivery_attempts WHERE id=$1 AND state='inflight'",
+      [claim.attempt_id]
+    );
+    if (phoneLease)
+      await client.query(
+        `UPDATE sender_controls SET next_send_at=$3::timestamptz,updated_at=now()
+         WHERE sender_key=$1 AND next_send_at=$2::timestamptz`,
+        [claim.sender_key, phoneLease.until, phoneLease.previous]
+      );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  }
+}
+
 async function processClaim(
   client: PoolClient,
   claim: Claim,
@@ -256,6 +299,10 @@ async function processClaim(
     await finishClaim(client, claim, "failed", "LIVE_SEND_DISABLED");
     return;
   }
+  if (!dispatchWindowOpen(options)) {
+    await deferUndispatchedClaim(client, claim);
+    return;
+  }
   const controller = new AbortController();
   const dispatchTimeoutMs = Math.max(
     100,
@@ -271,25 +318,43 @@ async function processClaim(
   let result: { messageId?: string } | undefined;
   let error: unknown;
   let phoneLookupLease: string | null = null;
+  let previousPhoneDeadline: string | null = null;
   try {
     if (connectionLost()) throw new Error("DATABASE_LOCK_LOST");
     if (claim.kind === "mtproto" && claim.recipient.startsWith("phone:")) {
       // Reserve before an external lookup: if this isolate/DB session dies,
       // another worker still observes a gap after the last possible lookup.
       // Use text to preserve PostgreSQL timestamp precision for the CAS below.
-      const reserved = await client.query<{ lease_until: string }>(
+      const reserved = await client.query<{
+        lease_until: string;
+        previous_deadline: string;
+      }>(
         `WITH lease AS (
            SELECT clock_timestamp()+$2*interval '1 millisecond' AS until
+         ), prior AS (
+           SELECT next_send_at FROM sender_controls WHERE sender_key=$1 FOR UPDATE
          )
          UPDATE sender_controls s
             SET next_send_at=GREATEST(s.next_send_at,lease.until),updated_at=now()
-           FROM lease WHERE s.sender_key=$1
-         RETURNING lease.until::text AS lease_until`,
+            FROM lease,prior WHERE s.sender_key=$1
+          RETURNING lease.until::text AS lease_until,
+                    prior.next_send_at::text AS previous_deadline`,
         [claim.sender_key, dispatchTimeoutMs + 3000]
       );
       if (!reserved.rows[0]?.lease_until)
         throw new Error("PHONE_LOOKUP_LEASE_UNAVAILABLE");
       phoneLookupLease = reserved.rows[0].lease_until;
+      previousPhoneDeadline = reserved.rows[0].previous_deadline;
+    }
+    if (!dispatchWindowOpen(options)) {
+      await deferUndispatchedClaim(
+        client,
+        claim,
+        phoneLookupLease && previousPhoneDeadline
+          ? { until: phoneLookupLease, previous: previousPhoneDeadline }
+          : undefined
+      );
+      return;
     }
     if (connectionLost() || controller.signal.aborted)
       throw new Error("DISPATCH_TIMEOUT_OR_LOCK_LOST");
@@ -344,12 +409,19 @@ async function processClaim(
         error.category === "slowmode" ||
         error.category === "transient"
       ) {
-        const attempts = await client.query(
-          "SELECT COUNT(*)::int AS count FROM delivery_attempts WHERE delivery_id=$1",
-          [claim.id]
-        );
-        // Confirmed-unsent transient failures have a retry cap. Server-mandated waits are retained.
-        if (error.category === "transient" && attempts.rows[0].count >= 5) {
+        let transientAttempts = 0;
+        if (error.category === "transient") {
+          const attempts = await client.query(
+            `SELECT COUNT(*)::int AS count FROM delivery_attempts
+             WHERE delivery_id=$1 AND state='deferred' AND error_code IS NOT NULL
+               AND error_code !~ '^(FLOOD_(PREMIUM_|TEST_PHONE_)?WAIT(_[0-9]+)?|SLOWMODE_WAIT(_[0-9]+)?|BOT_RATE_LIMIT|CONTACT_FREQUENCY_WAIT)$'`,
+            [claim.id]
+          );
+          // The current attempt is still inflight; only completed transient failures
+          // consume this budget. Telegram-mandated and contact-frequency waits do not.
+          transientAttempts = Number(attempts.rows[0].count) + 1;
+        }
+        if (error.category === "transient" && transientAttempts >= 5) {
           await finishClaim(client, claim, "failed", "UNSENT_RETRY_EXHAUSTED");
         } else {
           await client.query(
@@ -439,6 +511,7 @@ async function processClaim(
 export async function runWorkerOnce(
   options: WorkerOptions
 ): Promise<{ worked: boolean; deliveryId?: string }> {
+  if (!dispatchWindowOpen(options)) return { worked: false };
   const pool = options.pool ?? getPool();
   const liveEnabled =
     options.liveSendEnabled ?? process.env.LIVE_SEND_ENABLED === "true";
@@ -448,6 +521,7 @@ export async function runWorkerOnce(
       (c.status IN ('queued','running','stopping') OR EXISTS(SELECT 1 FROM deliveries d WHERE d.campaign_id=c.id AND d.state='inflight')))
     ORDER BY s.next_send_at,s.updated_at,s.sender_key LIMIT 100`);
   for (const { sender_key: key } of candidates.rows) {
+    if (!dispatchWindowOpen(options)) break;
     const client = await pool.connect();
     let locked = false;
     let broken = false;
@@ -471,6 +545,7 @@ export async function runWorkerOnce(
           86400
         )
       );
+      if (!dispatchWindowOpen(options)) continue;
       const claim = await claimNext(client, key, liveEnabled);
       if (!claim) continue;
       await processClaim(client, claim, options, () => broken);

@@ -67,6 +67,8 @@ export interface WorkerOptions {
   liveSendEnabled?: boolean;
   contactMinIntervalSeconds?: number;
   dispatchTimeoutMs?: number;
+  /** Absolute HTTP invocation deadline; never shorten an active dispatch. */
+  dispatchDeadlineMs?: number;
   workerId?: string;
 }
 

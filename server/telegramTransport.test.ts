@@ -81,6 +81,16 @@ describe("Telegram rejection classifier", () => {
       })
     ).not.toBeInstanceOf(DeliveryError);
   });
+  it.each(["PHONE_NUMBER_INVALID", "USERNAME_INVALID"])(
+    "does not schedule transient retries for the invalid recipient code %s",
+    errorMessage => {
+      expect(classifyMtprotoError({ errorMessage })).toMatchObject({
+        category: "recipient",
+        code: errorMessage,
+      });
+    }
+  );
+
   it("does not confuse a deleted recipient with sender restriction", () => {
     expect(
       classifyMtprotoError({ errorMessage: "INPUT_USER_DEACTIVATED" })

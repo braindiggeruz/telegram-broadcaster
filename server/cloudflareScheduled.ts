@@ -100,3 +100,21 @@ export async function runScheduledBatch() {
     }
   });
 }
+
+/** Best-effort first attempt after launch; Cron retains the durable queue. */
+export async function runImmediateDeliveryBatch() {
+  // HTTP waitUntil has 30 seconds after the response. Keep two seconds of
+  // platform margin and reserve settlement time before starting the full
+  // existing 20-second dispatch. Do not run automations or sleep here.
+  const dispatchDeadlineMs = Date.now() + 28_000;
+  return runWithDatabaseScope(async () =>
+    runWorkerOnce({
+      pool: getPool(),
+      transport: telegramTransport,
+      liveSendEnabled: process.env.LIVE_SEND_ENABLED === "true",
+      workerId: "cloudflare-http-kick",
+      dispatchTimeoutMs: 20_000,
+      dispatchDeadlineMs,
+    })
+  );
+}

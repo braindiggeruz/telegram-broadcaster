@@ -55,7 +55,30 @@ export async function confirmCampaignStop(options: {
   }
 }
 
+export function deliveryDisplayStatus(
+  status: string,
+  errorMessage: string | null | undefined
+) {
+  if (status !== "pending") return status;
+  return errorMessage?.trim() ? "retry_pending" : "queued";
+}
+
 export function deliveryDetail(reason: string | null | undefined) {
+  if (/^FLOOD_(?:PREMIUM_|TEST_PHONE_)?WAIT(?:_\d+)?$/.test(reason ?? "")) {
+    return "Telegram API запросил временную паузу. Отправка не подтверждена; повтор возможен после ожидания";
+  }
+  if (/^SLOWMODE_WAIT(?:_\d+)?$/.test(reason ?? "")) {
+    return "Telegram ограничил частоту сообщений в этом чате. Отправка не подтверждена; повтор возможен после ожидания";
+  }
+  if (reason === "PHONE_NUMBER_INVALID") {
+    return "Telegram отклонил номер телефона. Проверьте международный формат; поиск получателя не гарантирован";
+  }
+  if (reason === "USERNAME_INVALID") {
+    return "Telegram отклонил имя пользователя. Проверьте username получателя";
+  }
+  if (reason === "UNSENT_RETRY_EXHAUSTED") {
+    return "Лимит повторов после временных сбоев исчерпан. Сообщение не отправлено; автоматические повторы остановлены";
+  }
   if (reason === "PHONE_NOT_OCCUPIED") {
     return "Номер не найден или поиск скрыт настройками Telegram";
   }
@@ -110,7 +133,9 @@ export function campaignQueueNotice(progress: CampaignQueueProgress) {
   if (progress.sender?.state === "REVIEW_REQUIRED")
     return "Telegram ограничил отправителя. Требуется проверка; очередь сохранена.";
   if (progress.sender?.state === "COOLDOWN")
-    return "Telegram запросил паузу. Очередь сохранена; обработка продолжится после ожидания.";
+    return progress.sender.reason === "FLOOD_WAIT"
+      ? "Telegram API запросил временную паузу (FLOOD_WAIT). Этот ответ сам по себе не подтверждает спам-блокировку аккаунта. Очередь сохранена; после окончания паузы обработка повторится автоматически. Telegram может назначить новое ожидание."
+      : "Telegram запросил паузу. Очередь сохранена; обработка продолжится после ожидания.";
   if ((progress.retryPending ?? 0) > 0)
     return "Часть очереди ожидает повтора после подтверждённого отсутствия отправки. Эти сообщения ещё не приняты Telegram.";
   return null;

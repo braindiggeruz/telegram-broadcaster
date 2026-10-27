@@ -140,18 +140,19 @@ describe("official phone resolution without contact-book changes", () => {
     expect(mocks.destroy).toHaveBeenCalledTimes(1);
   });
 
-  it.each(["PHONE_NOT_OCCUPIED", "USER_PRIVACY_RESTRICTED"])(
-    "never sends or retries when lookup returns %s",
-    async errorMessage => {
-      mocks.invoke.mockRejectedValueOnce({ errorMessage });
-      await expect(telegramTransport.send(request())).rejects.toMatchObject({
-        category: "recipient",
-        code: errorMessage,
-      });
-      expect(mocks.invoke).toHaveBeenCalledTimes(1);
-      expect(mocks.getInputEntity).not.toHaveBeenCalled();
-    }
-  );
+  it.each([
+    "PHONE_NOT_OCCUPIED",
+    "USER_PRIVACY_RESTRICTED",
+    "PHONE_NUMBER_INVALID",
+  ])("never sends or retries when lookup returns %s", async errorMessage => {
+    mocks.invoke.mockRejectedValueOnce({ errorMessage });
+    await expect(telegramTransport.send(request())).rejects.toMatchObject({
+      category: "recipient",
+      code: errorMessage,
+    });
+    expect(mocks.invoke).toHaveBeenCalledTimes(1);
+    expect(mocks.getInputEntity).not.toHaveBeenCalled();
+  });
 
   it.each([
     resolved([], new Api.PeerChat({ chatId: bigInt(99) })),
