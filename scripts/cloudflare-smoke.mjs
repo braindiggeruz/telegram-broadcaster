@@ -226,6 +226,9 @@ async function run() {
 import { Api } from "telegram";
 import bigInt from "big-integer";
 import { Buffer } from "node:buffer";
+import { RPCMessageToError } from "telegram/errors/index.js";
+import { classifyMtprotoError } from "../../server/telegramTransport.ts";
+import { DeliveryError } from "../../server/delivery/types.ts";
 
 function encodeUpload(bytes: Buffer) {
   const request = new Api.upload.SaveFilePart({
@@ -243,6 +246,22 @@ function encodeUpload(bytes: Buffer) {
     filePartMatches: encoded.readInt32LE(12) === 7,
     lengthMatches: encoded[16] === 254 && encoded.readUIntLE(17, 3) === 128 * 1024,
     payloadMatches: encoded.subarray(20, 20 + bytes.length).equals(bytes),
+  };
+}
+
+function classifyWait(rpcCode: string) {
+  // Exercise the actual SDK conversion: specialized wait errors expose the
+  // generic errorMessage FLOOD while retaining the duration in seconds.
+  const error = RPCMessageToError(
+    new Api.RpcError({ errorCode: 420, errorMessage: rpcCode }),
+    new Api.contacts.ResolvePhone({ phone: "19990000000" })
+  );
+  const classified = classifyMtprotoError(error);
+  return {
+    category: classified instanceof DeliveryError ? classified.category : null,
+    code: classified instanceof DeliveryError ? classified.code : null,
+    retryAfterSeconds: classified instanceof DeliveryError ? classified.retryAfterSeconds : null,
+    sdkGenericCodeIsFlood: error.errorMessage === "FLOOD",
   };
 }
 
@@ -271,6 +290,12 @@ export default {
       const encodedMedia = media.getBytes();
       return Response.json({
         encodingOnly: true,
+        waits: {
+          flood: classifyWait("FLOOD_WAIT_2090"),
+          premium: classifyWait("FLOOD_PREMIUM_WAIT_120"),
+          slowmode: classifyWait("SLOWMODE_WAIT_70"),
+          testPhone: classifyWait("FLOOD_TEST_PHONE_WAIT_30"),
+        },
         uploads: {
           subarray: encodeUpload(Buffer.alloc(128 * 1024, 0xab).subarray(0)),
           nonzeroOffset: encodeUpload(offset),
@@ -398,6 +423,21 @@ export default {
       encoding.sendMedia.randomIdMatches === true &&
       encoding.sendMedia.stableEncoding === true
   );
+  for (const [name, category, code, seconds] of [
+    ["flood", "cooldown", "FLOOD_WAIT", 2090],
+    ["premium", "cooldown", "FLOOD_WAIT", 120],
+    ["slowmode", "slowmode", "SLOWMODE_WAIT", 70],
+    ["testPhone", "cooldown", "FLOOD_WAIT", 30],
+  ]) {
+    const wait = encoding.waits?.[name];
+    check(
+      `native_telegram_sdk_wait_${name}`,
+      wait?.sdkGenericCodeIsFlood === true &&
+        wait.category === category &&
+        wait.code === code &&
+        wait.retryAfterSeconds === seconds
+    );
+  }
   stage = "http_and_cron";
 
   const html = await fetch(base, { signal: signal() });

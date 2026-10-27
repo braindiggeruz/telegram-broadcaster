@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Api } from "telegram";
 import bigInt from "big-integer";
 import { createHash } from "node:crypto";
+import { FloodWaitError } from "telegram/errors/index.js";
 import { DeliveryError, type DeliveryRequest } from "./delivery/types";
 
 const mocks = vi.hoisted(() => ({
@@ -182,14 +183,16 @@ describe("official phone resolution without contact-book changes", () => {
   );
 
   it("preserves a server FloodWait without retrying the lookup", async () => {
-    mocks.invoke.mockRejectedValueOnce({
-      errorMessage: "FLOOD_WAIT_123",
-      seconds: 123,
-    });
+    mocks.invoke.mockRejectedValueOnce(
+      new FloodWaitError({
+        capture: 2090,
+        request: new Api.contacts.ResolvePhone({ phone: "+19990000000" }),
+      })
+    );
     await expect(telegramTransport.send(request())).rejects.toMatchObject({
       category: "cooldown",
       code: "FLOOD_WAIT",
-      retryAfterSeconds: 123,
+      retryAfterSeconds: 2090,
     });
     expect(mocks.invoke).toHaveBeenCalledTimes(1);
   });
@@ -202,6 +205,91 @@ describe("official phone resolution without contact-book changes", () => {
       retryAfterSeconds: 60,
     });
     expect(mocks.invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["connect", "resolve_phone"] as const)(
+    "logs only safe metadata for a private unknown failure at %s",
+    async stage => {
+      const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const secret = "synthetic-private-phone-session-request-value";
+      try {
+        const error = Object.assign(new Error(secret), {
+          name: secret,
+          errorMessage: secret,
+          code: secret,
+          stack: secret,
+          phone: secret,
+          sessionString: secret,
+          bytes: Buffer.from(secret),
+        });
+        if (stage === "connect") mocks.connect.mockRejectedValueOnce(error);
+        else mocks.invoke.mockRejectedValueOnce(error);
+        await expect(telegramTransport.send(request())).rejects.toBeInstanceOf(
+          Error
+        );
+        expect(warning).toHaveBeenCalledTimes(1);
+        expect(warning).toHaveBeenCalledWith(
+          JSON.stringify({
+            event: "telegram_phone_resolution_failure",
+            stage,
+            reason: "UNKNOWN",
+            name: "UNKNOWN",
+          })
+        );
+        expect(JSON.stringify(warning.mock.calls)).not.toContain(secret);
+        expect(JSON.stringify(warning.mock.calls)).not.toContain(
+          "+19990000000"
+        );
+        expect(JSON.stringify(warning.mock.calls)).not.toContain(sessionString);
+        expect(mocks.invoke).toHaveBeenCalledTimes(stage === "connect" ? 0 : 1);
+        expect(mocks.destroy).toHaveBeenCalledTimes(1);
+      } finally {
+        warning.mockRestore();
+      }
+    }
+  );
+
+  it.each(["connect", "resolve_phone"] as const)(
+    "identifies SDK reconnect exhaustion at %s without retrying or sending",
+    async stage => {
+      const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const error = "Maximum reconnection retries reached. Aborting!";
+        if (stage === "connect") mocks.connect.mockRejectedValueOnce(error);
+        else mocks.invoke.mockRejectedValueOnce(error);
+        await expect(telegramTransport.send(request())).rejects.toBeInstanceOf(
+          Error
+        );
+        expect(warning).toHaveBeenCalledTimes(1);
+        expect(warning).toHaveBeenCalledWith(
+          JSON.stringify({
+            event: "telegram_phone_resolution_failure",
+            stage,
+            reason: "RECONNECT_EXHAUSTED",
+            name: "UNKNOWN",
+          })
+        );
+        expect(mocks.invoke).toHaveBeenCalledTimes(stage === "connect" ? 0 : 1);
+      } finally {
+        warning.mockRestore();
+      }
+    }
+  );
+
+  it("does not mislabel an uncertain final send as phone resolution failure", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      mocks.invoke
+        .mockResolvedValueOnce(resolved())
+        .mockRejectedValueOnce({ code: "ETIMEDOUT" });
+      await expect(
+        telegramTransport.send(request())
+      ).rejects.not.toBeInstanceOf(DeliveryError);
+      expect(warning).not.toHaveBeenCalled();
+      expect(mocks.invoke).toHaveBeenCalledTimes(2);
+    } finally {
+      warning.mockRestore();
+    }
   });
 
   it("does not retry an uncertain final message result", async () => {

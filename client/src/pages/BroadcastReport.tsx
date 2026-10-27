@@ -1,8 +1,12 @@
 import { useRef, useState } from "react";
 import { trpc } from "@/lib/trpc";
 import {
+  campaignDisplayStatus,
+  campaignQueueNotice,
   confirmCampaignStop,
   deliveryDetail,
+  formatCampaignTime,
+  type CampaignQueueProgress,
   type StopFeedback,
 } from "@/lib/campaignFeedback";
 import { Link, useParams } from "wouter";
@@ -109,12 +113,16 @@ export default function BroadcastReport({
       </div>
     );
   const additional = progress as
-    | (typeof progress & {
-        unknown?: number;
-        suppressed?: number;
-        dryRun?: number;
-      })
+    | (typeof progress &
+        CampaignQueueProgress & {
+          unknown?: number;
+          suppressed?: number;
+          dryRun?: number;
+        })
     | undefined;
+  const queueNotice = additional ? campaignQueueNotice(additional) : null;
+  const nextAttemptAt = formatCampaignTime(additional?.nextAttemptAt);
+  const lastActivityAt = formatCampaignTime(additional?.lastActivityAt);
   const download = async () => {
     setExporting(true);
     try {
@@ -224,18 +232,23 @@ export default function BroadcastReport({
         </div>
       )}
       <div className="flex items-center gap-3">
-        <StatusBadge status={status} />
+        <StatusBadge
+          status={progress ? campaignDisplayStatus(progress) : status}
+        />
         {(progress?.isDryRun ?? bc.isDryRun) && (
           <span className="inline-flex rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-xs font-medium text-amber-300">
             Без отправки
           </span>
         )}
       </div>
-      <section className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+      <section className="grid grid-cols-2 sm:grid-cols-3 gap-3">
         {[
           { label: "Всего", value: progress?.total ?? bc.totalRecipients },
           { label: "Принято Telegram", value: progress?.sent ?? bc.sentCount },
           { label: "Ошибки", value: progress?.failed ?? bc.failedCount },
+          { label: "В очереди", value: progress?.pending ?? 0 },
+          { label: "В обработке", value: progress?.inflight ?? 0 },
+          { label: "Ожидают повтора", value: additional?.retryPending ?? 0 },
           { label: "Неопределённо", value: additional?.unknown ?? 0 },
           { label: "Исключено", value: additional?.suppressed ?? 0 },
           { label: "Проверено", value: additional?.dryRun ?? 0 },
@@ -249,6 +262,22 @@ export default function BroadcastReport({
           </div>
         ))}
       </section>
+      {queueNotice && (
+        <p
+          role="status"
+          className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm"
+        >
+          {queueNotice}
+        </p>
+      )}
+      <div className="space-y-1 text-xs text-muted-foreground">
+        <p>
+          «Ожидают повтора» — часть получателей в очереди, а не отправленные
+          сообщения.
+        </p>
+        {nextAttemptAt && <p>Повтор возможен с: {nextAttemptAt}</p>}
+        {lastActivityAt && <p>Последнее изменение: {lastActivityAt}</p>}
+      </div>
       <p className="text-xs text-muted-foreground">
         Успех API не подтверждает прочтение. Неопределённые результаты не
         повторяются автоматически.

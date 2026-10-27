@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Api } from "telegram";
 import bigInt from "big-integer";
 import { createHash } from "node:crypto";
+import { FloodWaitError } from "telegram/errors/index.js";
 import type { DeliveryRequest } from "./delivery/types";
 import { DeliveryError } from "./delivery/types";
 
@@ -93,33 +94,66 @@ afterEach(() => {
 });
 
 describe("account photo transport", () => {
-  it("uploads bounded parts and sends one parsed caption with the persisted randomId", async () => {
-    await expect(telegramTransport.send(request())).resolves.toEqual({
-      messageId: "123",
-    });
-    expect(mocks.getPhotoBytes).toHaveBeenCalledWith(1, photoId);
-    const operations = mocks.invoke.mock.calls.map(([operation]) => operation);
-    const parts = operations.filter(
-      operation => operation instanceof Api.upload.SaveFilePart
-    );
-    expect(parts).toHaveLength(3);
-    expect(parts.map(part => part.filePart)).toEqual([0, 1, 2]);
-    expect(parts.every(part => part.bytes.length <= 128 * 1024)).toBe(true);
-    expect(Buffer.concat(parts.map(part => part.bytes))).toEqual(bytes);
-    expect(new Set(parts.map(part => part.fileId.toString())).size).toBe(1);
-    const send = operations[3];
-    expect(send).toBeInstanceOf(Api.messages.SendMedia);
-    expect(send.randomId.toString()).toBe("9223372036854775806");
-    expect(send.message).toBe("Подпись");
-    expect(send.entities[0]).toBeInstanceOf(Api.MessageEntityBold);
-    expect(send.media).toBeInstanceOf(Api.InputMediaUploadedPhoto);
-    expect(send.media.file.parts).toBe(3);
-    expect(send.media.file.id.toString()).toBe(parts[0].fileId.toString());
-    expect(send.media.file.md5Checksum).toBe(
-      createHash("md5").update(bytes).digest("hex")
-    );
-    expect(mocks.destroy).toHaveBeenCalled();
-  });
+  it.each([
+    { length: 300 * 1024, partCount: 10, lastSize: 12288 },
+    { length: 32768, partCount: 1, lastSize: 32768 },
+    { length: 32769, partCount: 2, lastSize: 1 },
+    { length: 1024 * 1024 - 1, partCount: 32, lastSize: 32767 },
+    { length: 1024 * 1024, partCount: 32, lastSize: 32768 },
+  ])(
+    "uploads $length bytes in $partCount bounded parts and sends once",
+    async ({ length, partCount, lastSize }) => {
+      const inputBytes = Buffer.alloc(length);
+      for (let i = 0; i < length; i++) inputBytes[i] = i % 251;
+      const digest = createHash("sha256").update(inputBytes).digest("hex");
+      mocks.getPhotoBytes.mockResolvedValueOnce({
+        attachment: {
+          id: photoId,
+          sha256: digest,
+          mimeType: "image/jpeg",
+          size: inputBytes.length,
+        },
+        bytes: inputBytes,
+      });
+      await expect(
+        telegramTransport.send(request({ photoSha256: digest }))
+      ).resolves.toEqual({
+        messageId: "123",
+      });
+      expect(mocks.getPhotoBytes).toHaveBeenCalledWith(1, photoId);
+      const operations = mocks.invoke.mock.calls.map(
+        ([operation]) => operation
+      );
+      const parts = operations.filter(
+        operation => operation instanceof Api.upload.SaveFilePart
+      );
+      expect(parts).toHaveLength(partCount);
+      expect(parts.map(part => part.filePart)).toEqual(
+        Array.from({ length: partCount }, (_, index) => index)
+      );
+      expect(
+        parts.every(part => part.bytes.length > 0 && part.bytes.length <= 32768)
+      ).toBe(true);
+      expect(parts.at(-1)!.bytes.length).toBe(lastSize);
+      expect(
+        Buffer.concat(parts.map(part => part.bytes)).equals(inputBytes)
+      ).toBe(true);
+      expect(new Set(parts.map(part => part.fileId.toString())).size).toBe(1);
+      expect(operations).toHaveLength(partCount + 1);
+      const send = operations.at(-1)!;
+      expect(send).toBeInstanceOf(Api.messages.SendMedia);
+      expect(send.randomId.toString()).toBe("9223372036854775806");
+      expect(send.message).toBe("Подпись");
+      expect(send.entities[0]).toBeInstanceOf(Api.MessageEntityBold);
+      expect(send.media).toBeInstanceOf(Api.InputMediaUploadedPhoto);
+      expect(send.media.file.parts).toBe(partCount);
+      expect(send.media.file.id.toString()).toBe(parts[0].fileId.toString());
+      expect(send.media.file.md5Checksum).toBe(
+        createHash("md5").update(inputBytes).digest("hex")
+      );
+      expect(mocks.destroy).toHaveBeenCalled();
+    }
+  );
 
   it("allows a photo without a caption", async () => {
     await telegramTransport.send(request({ message: "" }));
@@ -234,15 +268,45 @@ describe("account photo transport", () => {
     expect(mocks.destroy).toHaveBeenCalled();
   });
 
-  it("retains a server FloodWait without retrying or sending a message", async () => {
-    mocks.invoke.mockRejectedValueOnce({
-      errorMessage: "FLOOD_WAIT_123",
-      seconds: 123,
+  it("stops all subsequent chunks and SendMedia when aborted after multiple parts", async () => {
+    const controller = new AbortController();
+    mocks.invoke.mockImplementation(async operation => {
+      if (operation instanceof Api.upload.SaveFilePart) {
+        if (operation.filePart === 1) controller.abort();
+        return true;
+      }
+      return confirmed();
     });
+    await expect(
+      telegramTransport.send(request({ signal: controller.signal }))
+    ).rejects.not.toBeInstanceOf(DeliveryError);
+    expect(mocks.invoke).toHaveBeenCalledTimes(2);
+    expect(
+      mocks.invoke.mock.calls.map(([operation]) => operation.filePart)
+    ).toEqual([0, 1]);
+    expect(
+      mocks.invoke.mock.calls.every(
+        ([operation]) => operation instanceof Api.upload.SaveFilePart
+      )
+    ).toBe(true);
+    expect(mocks.destroy).toHaveBeenCalled();
+  });
+
+  it("retains a server FloodWait without retrying or sending a message", async () => {
+    mocks.invoke.mockRejectedValueOnce(
+      new FloodWaitError({
+        capture: 2090,
+        request: new Api.upload.SaveFilePart({
+          fileId: bigInt.one,
+          filePart: 0,
+          bytes: Buffer.from([1]),
+        }),
+      })
+    );
     await expect(telegramTransport.send(request())).rejects.toMatchObject({
       category: "cooldown",
       code: "FLOOD_WAIT",
-      retryAfterSeconds: 123,
+      retryAfterSeconds: 2090,
     });
     expect(mocks.invoke).toHaveBeenCalledTimes(1);
   });

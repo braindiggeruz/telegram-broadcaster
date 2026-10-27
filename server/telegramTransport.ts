@@ -5,6 +5,7 @@ import { _parseMessageText } from "telegram/client/messageParse.js";
 import { getBotSettings, getMtprotoSession } from "./db";
 import { createClient } from "./mtproto";
 import { getPhotoBytes } from "./media";
+import { getTelegramWait } from "./telegramWait";
 import { PHOTO_CAPTION_MAX_LENGTH, PHOTO_MAX_BYTES } from "../shared/media";
 import {
   DeliveryError,
@@ -85,6 +86,8 @@ export function classifyBotError(result: BotResponse): DeliveryError | Error {
   return new Error("BOT_RESULT_UNKNOWN");
 }
 export function classifyMtprotoError(error: unknown): DeliveryError | Error {
+  const wait = getTelegramWait(error);
+  if (wait) return new DeliveryError(wait.category, wait.code, wait.seconds);
   const e = error as { errorMessage?: string; seconds?: number };
   const code = e?.errorMessage;
   if (!code) return new Error("MTPROTO_RESULT_UNKNOWN");
@@ -94,18 +97,6 @@ export function classifyMtprotoError(error: unknown): DeliveryError | Error {
     )
   )
     return new DeliveryError("recipient", code);
-  if (/^FLOOD_WAIT(?:_\d+)?$|^FLOOD_PREMIUM_WAIT(?:_\d+)?$/.test(code))
-    return new DeliveryError(
-      "cooldown",
-      "FLOOD_WAIT",
-      e.seconds ?? Number(code.match(/\d+$/)?.[0] ?? 60)
-    );
-  if (/^SLOWMODE_WAIT(?:_\d+)?$/.test(code))
-    return new DeliveryError(
-      "slowmode",
-      "SLOWMODE_WAIT",
-      e.seconds ?? Number(code.match(/\d+$/)?.[0] ?? 60)
-    );
   if (
     /^(PEER_FLOOD|USER_RESTRICTED|USER_DEACTIVATED|USER_DEACTIVATED_BAN|FROZEN_METHOD_INVALID|PHONE_NUMBER_BANNED)$/.test(
       code
@@ -131,6 +122,15 @@ export function classifyMtprotoError(error: unknown): DeliveryError | Error {
 }
 
 const UPLOAD_DIAGNOSTIC_RPC_CODES = new Set([
+  "PHONE_NOT_OCCUPIED",
+  "PHONE_NUMBER_INVALID",
+  "PHONE_NUMBER_BANNED",
+  "USER_PRIVACY_RESTRICTED",
+  "USER_IS_BLOCKED",
+  "YOU_BLOCKED_USER",
+  "INPUT_USER_DEACTIVATED",
+  "PEER_ID_INVALID",
+  "USER_RESTRICTED",
   "FILE_PART_EMPTY",
   "FILE_PART_INVALID",
   "FILE_PART_SIZE_INVALID",
@@ -184,6 +184,11 @@ const UPLOAD_DIAGNOSTIC_NAMES = new Set([
   "TimedOutError",
   "FileMigrateError",
   "FloodWaitError",
+  "FloodTestPhoneWaitError",
+  "SlowModeWaitError",
+  "TimeoutError",
+  "AbortError",
+  "QuotaExceededError",
 ]);
 const UPLOAD_DIAGNOSTIC_FIXED_MESSAGES = new Map([
   ["Maximum reconnection retries reached. Aborting!", "RECONNECT_EXHAUSTED"],
@@ -193,11 +198,13 @@ const UPLOAD_DIAGNOSTIC_FIXED_MESSAGES = new Map([
   ["Auth key not set", "AUTH_KEY_UNSET"],
   ["Unset AuthKey", "AUTH_KEY_UNSET"],
   ["Not a valid string", "INVALID_SESSION_FORMAT"],
+  ["MTPROTO_ABORTED", "DISPATCH_ABORTED"],
+  ["MTPROTO_DISCONNECT_FAILED", "DISCONNECT_FAILED"],
 ]);
 
 /** Fixed metadata only: raw exceptions may contain request bytes and credentials. */
 export function photoUploadFailureDiagnostic(error: unknown) {
-  let reason = "UNKNOWN";
+  let reason: string = getTelegramWait(error)?.code ?? "UNKNOWN";
   let name = "UNKNOWN";
   try {
     const problem = error as {
@@ -206,7 +213,7 @@ export function photoUploadFailureDiagnostic(error: unknown) {
       name?: unknown;
     } | null;
     const rpc = problem?.errorMessage;
-    if (typeof rpc === "string") {
+    if (reason === "UNKNOWN" && typeof rpc === "string") {
       if (UPLOAD_DIAGNOSTIC_RPC_CODES.has(rpc)) reason = rpc;
       else if (/^FLOOD_(?:PREMIUM_)?WAIT(?:_\d+)?$/.test(rpc))
         reason = "FLOOD_WAIT";
@@ -247,6 +254,19 @@ export function photoUploadFailureDiagnostic(error: unknown) {
   return {
     event: "telegram_media_failure",
     stage: "upload_part",
+    reason,
+    name,
+  } as const;
+}
+
+export function phoneResolutionFailureDiagnostic(
+  stage: "connect" | "resolve_phone",
+  error: unknown
+) {
+  const { reason, name } = photoUploadFailureDiagnostic(error);
+  return {
+    event: "telegram_phone_resolution_failure",
+    stage,
     reason,
     name,
   } as const;
@@ -335,7 +355,9 @@ async function uploadPhoto(
 ): Promise<Api.InputMediaUploadedPhoto> {
   // Avoid GramJS uploadFile/sendFile: their upload retry loop may sleep through
   // an abort, and sendFile creates a different logical-message randomId.
-  const partSize = 128 * 1024;
+  // Native Workers probes accepted 32 KiB parts; 128 KiB encoded correctly but
+  // disconnected during upload. Keep the size verified on the deployed runtime.
+  const partSize = 32 * 1024;
   const parts = Math.ceil(photo.bytes.length / partSize);
   const fileId = bigInt(
     (randomBytes(8).readBigUInt64BE() & 0x7fffffffffffffffn || 1n).toString()
@@ -450,19 +472,31 @@ async function sendMtproto(request: DeliveryRequest) {
   const ensureActive = () => {
     if (aborted || request.signal.aborted) throw new Error("MTPROTO_ABORTED");
   };
+  let phoneStage: "connect" | "resolve_phone" | undefined;
+  const reportPhoneFailure = (error: unknown) => {
+    if (!phoneStage) return;
+    const stage = phoneStage;
+    phoneStage = undefined;
+    console.warn(
+      JSON.stringify(phoneResolutionFailureDiagnostic(stage, error))
+    );
+  };
   try {
     ensureActive();
     const operation = (async () => {
+      if (request.recipient.startsWith("phone:")) phoneStage = "connect";
       await client.connect();
       ensureActive();
       let peer: Api.TypeInputPeer;
       try {
         if (request.recipient.startsWith("phone:")) {
+          phoneStage = "resolve_phone";
           peer = await resolvePhonePeer(
             client,
             request.recipient.slice(6),
             ensureActive
           );
+          phoneStage = undefined;
         } else {
           const target = request.recipient.startsWith("chat:")
             ? bigInt(request.recipient.slice(5))
@@ -470,6 +504,7 @@ async function sendMtproto(request: DeliveryRequest) {
           peer = await client.getInputEntity(target);
         }
       } catch (e) {
+        reportPhoneFailure(e);
         ensureActive();
         if (e instanceof DeliveryError) throw e;
         const classified = classifyMtprotoError(e);
@@ -537,6 +572,7 @@ async function sendMtproto(request: DeliveryRequest) {
     })();
     return await Promise.race([operation, abortPromise]);
   } catch (e) {
+    reportPhoneFailure(e);
     if (e instanceof DeliveryError) throw e;
     throw classifyMtprotoError(e);
   } finally {

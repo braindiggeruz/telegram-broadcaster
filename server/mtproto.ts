@@ -8,6 +8,7 @@ import { getPool } from "./connection";
 import { getMtprotoSession } from "./db";
 import { decryptSecret, encryptSecret } from "./security/secrets";
 import { LOGIN_PHONE_ERROR, normalizeLoginPhone } from "../shared/loginPhone";
+import { getTelegramWait } from "./telegramWait";
 import type {
   LoginCodeDelivery,
   MtprotoAuthStatus,
@@ -179,15 +180,15 @@ async function errorForAuth(
     code?: string;
   };
   const code = problem?.errorMessage ?? "";
-  const wait = Number(problem?.seconds);
-  if (/^FLOOD_WAIT(?:_\d+)?$/.test(code) && Number.isFinite(wait) && wait > 0) {
+  const wait = getTelegramWait(error);
+  if (wait) {
     await tx.query(
       `UPDATE mtproto_auth_controls SET next_code_at=GREATEST(next_code_at,now()+$2*interval '1 second') WHERE user_id=$1`,
-      [userId, Math.ceil(wait)]
+      [userId, wait.seconds]
     );
     return new TRPCError({
       code: "TOO_MANY_REQUESTS",
-      message: `Telegram требует паузу ${Math.ceil(wait)} сек. Автоматический повтор отключён.`,
+      message: `Telegram требует паузу ${wait.seconds} сек. Автоматический повтор отключён.`,
     });
   }
   if (
@@ -446,6 +447,8 @@ async function claimCodeRequest(tx: PoolClient, userId: number) {
 }
 
 function authFailureReason(error: unknown): string {
+  const wait = getTelegramWait(error);
+  if (wait) return wait.code;
   const problem = error as { errorMessage?: unknown; code?: unknown } | null;
   const rpcCodes = new Set([
     "API_ID_INVALID",

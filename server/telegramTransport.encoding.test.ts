@@ -3,7 +3,7 @@ import { Api } from "telegram";
 import bigInt from "big-integer";
 
 describe("real GramJS upload request encoding", () => {
-  it.each([1, 253, 254, 255, 128 * 1024, 1024 * 1024])(
+  it.each([1, 253, 254, 255, 32 * 1024, 128 * 1024, 1024 * 1024])(
     "serializes the precise Buffer subarray and TL length/padding for %i bytes",
     length => {
       const backing = Buffer.alloc(length + 18, 0xcd);

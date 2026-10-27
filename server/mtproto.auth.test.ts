@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { decryptSecret } from "./security/secrets";
 import { LOGIN_PHONE_ERROR } from "../shared/loginPhone";
+import { Api as RealApi } from "telegram/tl/index.js";
+import {
+  FloodWaitError,
+  FloodTestPhoneWaitError,
+  SlowModeWaitError,
+  RPCMessageToError,
+} from "telegram/errors/index.js";
 
 const mocks = vi.hoisted(() => ({
   clients: [] as any[],
@@ -167,6 +174,51 @@ afterEach(() => {
 });
 
 describe("request-scoped MTProto authentication", () => {
+  it.each([FloodWaitError, FloodTestPhoneWaitError, SlowModeWaitError])(
+    "persists the complete real SDK %s wait when requesting a code",
+    async WaitError => {
+      mocks.invoke.mockRejectedValueOnce(
+        new WaitError({
+          capture: 2090,
+          request: new RealApi.contacts.ResolvePhone({ phone: "+19990000000" }),
+        })
+      );
+      await expect(sendPhoneCode(140, "+19990000000")).rejects.toMatchObject({
+        code: "TOO_MANY_REQUESTS",
+        message:
+          "Telegram требует паузу 2090 сек. Автоматический повтор отключён.",
+      });
+      const flood = mocks.txQuery.mock.calls.find(([sql]) =>
+        sql.startsWith("UPDATE mtproto_auth_controls")
+      );
+      expect(flood?.[0]).toContain("GREATEST(next_code_at");
+      expect(flood?.[1]).toEqual([140, 2090]);
+      expect(mocks.invoke).toHaveBeenCalledTimes(1);
+      expect(mocks.records.size).toBe(0);
+    }
+  );
+
+  it("persists a real premium wait returned by the SDK RPC converter", async () => {
+    const error = RPCMessageToError(
+      new RealApi.RpcError({
+        errorCode: 420,
+        errorMessage: "FLOOD_PREMIUM_WAIT_2090",
+      }),
+      new RealApi.contacts.ResolvePhone({ phone: "+19990000000" })
+    );
+    expect(error).toBeInstanceOf(FloodWaitError);
+    await sendPhoneCode(141, "+19990000000");
+    mocks.invoke.mockRejectedValueOnce(error);
+    await expect(signInWithCode(141, "12345")).rejects.toMatchObject({
+      code: "TOO_MANY_REQUESTS",
+    });
+    const flood = mocks.txQuery.mock.calls.find(([sql]) =>
+      sql.startsWith("UPDATE mtproto_auth_controls")
+    );
+    expect(flood?.[1]).toEqual([141, 2090]);
+    expect(mocks.invoke).toHaveBeenCalledTimes(2);
+    expect(mocks.records.size).toBe(0);
+  });
   it("corrects one completed GramJS DC redirect without enabling general retries", async () => {
     mocks.invoke.mockImplementationOnce(async () => {
       mocks.clients[0].session.dcId = 2;
