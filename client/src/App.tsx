@@ -17,31 +17,45 @@ import UserBroadcast from "./pages/UserBroadcast";
 import Autopilot from "./pages/Autopilot";
 import Login from "./pages/Login";
 import { trpc } from "./lib/trpc";
+import { onlineManager } from "@tanstack/react-query";
+import { useSyncExternalStore } from "react";
+import ConnectionRecovery from "./components/ConnectionRecovery";
+import {
+  isTransientReadError,
+  sessionQueryOptions,
+} from "./lib/networkRecovery";
 
 function Router() {
-  const session = trpc.auth.me.useQuery(undefined, {
-    retry: false,
-    refetchInterval: 60000,
-  });
-  if (session.isLoading)
+  const session = trpc.auth.me.useQuery(undefined, sessionQueryOptions);
+  const isOnline = useSyncExternalStore(
+    onlineManager.subscribe,
+    () => onlineManager.isOnline(),
+    () => true
+  );
+  // A failed background refresh must also close access while retries are pending.
+  const sessionError = session.error ?? session.failureReason;
+  if (
+    session.isPending ||
+    sessionError ||
+    !session.isSuccess ||
+    session.data === undefined
+  )
     return (
-      <div className="min-h-screen flex items-center justify-center text-sm text-muted-foreground">
-        Загружаем TG Sender…
-      </div>
+      <ConnectionRecovery
+        state={
+          !isOnline || session.fetchStatus === "paused"
+            ? "offline"
+            : sessionError
+              ? isTransientReadError(sessionError)
+                ? "reconnecting"
+                : "unavailable"
+              : "checking"
+        }
+        isFetching={session.isFetching}
+        onRetry={() => void session.refetch()}
+      />
     );
-  if (session.error)
-    return (
-      <div className="min-h-screen flex flex-col items-center justify-center gap-4 p-6">
-        <p role="alert">Не удалось проверить доступ: {session.error.message}</p>
-        <button
-          className="text-primary underline"
-          onClick={() => void session.refetch()}
-        >
-          Повторить
-        </button>
-      </div>
-    );
-  if (!session.data) return <Login />;
+  if (session.data === null) return <Login />;
   return (
     <AppLayout>
       <Switch>
