@@ -622,25 +622,46 @@ export default {
     },
     true
   );
-  await rpc("broadcast.launch", { id: cancelledCampaign.id }, true);
-  const stopped = await rpc(
-    "broadcast.cancel",
-    { id: cancelledCampaign.id },
-    true
-  );
-  const stoppedProgress = await rpc("broadcast.getProgress", {
-    id: cancelledCampaign.id,
+  // Hold the same sender barrier as a busy worker so the immediate launch
+  // kick cannot consume this cancellation fixture before the stop request.
+  // This is an isolated CI database; the production worker is unchanged.
+  const cancellationGuard = new pg.Client({
+    connectionString: source.toString(),
+    ssl: false,
+    connectionTimeoutMillis: 5000,
+    query_timeout: 15_000,
   });
-  check(
-    "stop_acknowledged_and_verified_by_progress",
-    stopped.acknowledged === true &&
-      stopped.status === "stopped" &&
-      stoppedProgress.status === "stopped" &&
-      stoppedProgress.cancelled === 2 &&
-      stoppedProgress.pending === 0 &&
-      stoppedProgress.inflight === 0 &&
-      stoppedProgress.accepted === 0
-  );
+  await cancellationGuard.connect();
+  try {
+    await cancellationGuard.query(
+      "SELECT pg_advisory_lock(hashtextextended($1,0))",
+      [`${cancelledCampaign.userId}:bot`]
+    );
+    await rpc("broadcast.launch", { id: cancelledCampaign.id }, true);
+    const stopped = await rpc(
+      "broadcast.cancel",
+      { id: cancelledCampaign.id },
+      true
+    );
+    const stoppedProgress = await rpc("broadcast.getProgress", {
+      id: cancelledCampaign.id,
+    });
+    check(
+      "stop_acknowledged_and_verified_by_progress",
+      stopped.acknowledged === true &&
+        stopped.status === "stopped" &&
+        stoppedProgress.status === "stopped" &&
+        stoppedProgress.cancelled === 2 &&
+        stoppedProgress.pending === 0 &&
+        stoppedProgress.inflight === 0 &&
+        stoppedProgress.accepted === 0 &&
+        stoppedProgress.dryRun === 0
+    );
+  } finally {
+    // Closing this dedicated connection releases the advisory lock even if an
+    // assertion or HTTP request failed; never return a held lock to a pool.
+    await cancellationGuard.end();
+  }
   const stoppedAgain = await rpc(
     "broadcast.cancel",
     { id: cancelledCampaign.id },
