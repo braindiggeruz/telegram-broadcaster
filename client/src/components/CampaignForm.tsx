@@ -1,7 +1,14 @@
 import { useRef, useState } from "react";
 import { Link, useLocation } from "wouter";
 import { trpc } from "@/lib/trpc";
-import { confirmCampaignStop, type StopFeedback } from "@/lib/campaignFeedback";
+import {
+  campaignDisplayStatus,
+  campaignQueueNotice,
+  confirmCampaignStop,
+  formatCampaignTime,
+  type CampaignQueueProgress,
+  type StopFeedback,
+} from "@/lib/campaignFeedback";
 import { useServerDraft, type ParseMode } from "@/hooks/useServerDraft";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -96,12 +103,16 @@ export default function CampaignForm({
   const active =
     !!activeId && (!progress || !terminalStatuses.has(progress.status));
   const current = progress as
-    | (typeof progress & {
-        unknown?: number;
-        suppressed?: number;
-        dryRun?: number;
-      })
+    | (typeof progress &
+        CampaignQueueProgress & {
+          unknown?: number;
+          suppressed?: number;
+          dryRun?: number;
+        })
     | undefined;
+  const queueNotice = current ? campaignQueueNotice(current) : null;
+  const nextAttemptAt = formatCampaignTime(current?.nextAttemptAt);
+  const lastActivityAt = formatCampaignTime(current?.lastActivityAt);
   const hasPhoto =
     transport === "mtproto" && (!!draft.photoId || !!pendingPhoto);
   const messageLimit = hasPhoto ? PHOTO_CAPTION_MAX_LENGTH : 4096;
@@ -252,7 +263,7 @@ export default function CampaignForm({
               <p className="text-sm font-semibold">Кампания #{activeId}</p>
               <div className="mt-2">
                 {progress ? (
-                  <StatusBadge status={progress.status} />
+                  <StatusBadge status={campaignDisplayStatus(progress)} />
                 ) : (
                   <span className="text-xs text-muted-foreground">
                     Получаем состояние…
@@ -313,11 +324,17 @@ export default function CampaignForm({
           )}
           {progress && (
             <>
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                 {[
                   { label: "Всего", value: progress.total },
                   { label: "Принято Telegram", value: progress.sent },
                   { label: "Ошибки", value: progress.failed },
+                  { label: "В очереди", value: progress.pending },
+                  { label: "В обработке", value: progress.inflight },
+                  {
+                    label: "Ожидают повтора",
+                    value: current?.retryPending ?? 0,
+                  },
                   { label: "Неопределённо", value: current?.unknown ?? 0 },
                   { label: "Исключено", value: current?.suppressed ?? 0 },
                   { label: "Проверено", value: current?.dryRun ?? 0 },
@@ -332,6 +349,22 @@ export default function CampaignForm({
                     </p>
                   </div>
                 ))}
+              </div>
+              {queueNotice && (
+                <p
+                  role="status"
+                  className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm"
+                >
+                  {queueNotice}
+                </p>
+              )}
+              <div className="space-y-1 text-xs text-muted-foreground">
+                <p>
+                  «Ожидают повтора» — часть получателей в очереди, а не
+                  отправленные сообщения.
+                </p>
+                {nextAttemptAt && <p>Повтор возможен с: {nextAttemptAt}</p>}
+                {lastActivityAt && <p>Последнее изменение: {lastActivityAt}</p>}
               </div>
               <p className="text-xs text-muted-foreground">
                 «Принято Telegram» означает успешный ответ API. Прочтение

@@ -5,6 +5,7 @@ import { _parseMessageText } from "telegram/client/messageParse.js";
 import { getBotSettings, getMtprotoSession } from "./db";
 import { createClient } from "./mtproto";
 import { getPhotoBytes } from "./media";
+import { getTelegramWait } from "./telegramWait";
 import { PHOTO_CAPTION_MAX_LENGTH, PHOTO_MAX_BYTES } from "../shared/media";
 import {
   DeliveryError,
@@ -85,6 +86,8 @@ export function classifyBotError(result: BotResponse): DeliveryError | Error {
   return new Error("BOT_RESULT_UNKNOWN");
 }
 export function classifyMtprotoError(error: unknown): DeliveryError | Error {
+  const wait = getTelegramWait(error);
+  if (wait) return new DeliveryError(wait.category, wait.code, wait.seconds);
   const e = error as { errorMessage?: string; seconds?: number };
   const code = e?.errorMessage;
   if (!code) return new Error("MTPROTO_RESULT_UNKNOWN");
@@ -94,18 +97,6 @@ export function classifyMtprotoError(error: unknown): DeliveryError | Error {
     )
   )
     return new DeliveryError("recipient", code);
-  if (/^FLOOD_WAIT(?:_\d+)?$|^FLOOD_PREMIUM_WAIT(?:_\d+)?$/.test(code))
-    return new DeliveryError(
-      "cooldown",
-      "FLOOD_WAIT",
-      e.seconds ?? Number(code.match(/\d+$/)?.[0] ?? 60)
-    );
-  if (/^SLOWMODE_WAIT(?:_\d+)?$/.test(code))
-    return new DeliveryError(
-      "slowmode",
-      "SLOWMODE_WAIT",
-      e.seconds ?? Number(code.match(/\d+$/)?.[0] ?? 60)
-    );
   if (
     /^(PEER_FLOOD|USER_RESTRICTED|USER_DEACTIVATED|USER_DEACTIVATED_BAN|FROZEN_METHOD_INVALID|PHONE_NUMBER_BANNED)$/.test(
       code
@@ -129,6 +120,158 @@ export function classifyMtprotoError(error: unknown): DeliveryError | Error {
     return new DeliveryError("content", code);
   return new Error("MTPROTO_RESULT_UNKNOWN");
 }
+
+const UPLOAD_DIAGNOSTIC_RPC_CODES = new Set([
+  "PHONE_NOT_OCCUPIED",
+  "PHONE_NUMBER_INVALID",
+  "PHONE_NUMBER_BANNED",
+  "USER_PRIVACY_RESTRICTED",
+  "USER_IS_BLOCKED",
+  "YOU_BLOCKED_USER",
+  "INPUT_USER_DEACTIVATED",
+  "PEER_ID_INVALID",
+  "USER_RESTRICTED",
+  "FILE_PART_EMPTY",
+  "FILE_PART_INVALID",
+  "FILE_PART_SIZE_INVALID",
+  "FILE_PART_TOO_BIG",
+  "FILE_PARTS_INVALID",
+  "FILE_ID_INVALID",
+  "MSG_ID_INVALID",
+  "AUTH_KEY_UNREGISTERED",
+  "AUTH_KEY_DUPLICATED",
+  "SESSION_REVOKED",
+  "SESSION_EXPIRED",
+  "USER_DEACTIVATED",
+  "USER_DEACTIVATED_BAN",
+  "FROZEN_METHOD_INVALID",
+  "PEER_FLOOD",
+  "RPC_CALL_FAIL",
+  "RPC_MCGET_FAIL",
+  "CONNECTION_NOT_INITED",
+  "CONNECTION_LAYER_INVALID",
+  "INPUT_LAYER_INVALID",
+  "METHOD_INVALID",
+]);
+const UPLOAD_DIAGNOSTIC_SYSTEM_CODES = new Set([
+  "ETIMEDOUT",
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EPIPE",
+  "ERR_INVALID_ARG_TYPE",
+  "ERR_OUT_OF_RANGE",
+  "ERR_NOT_IMPLEMENTED",
+  "ERR_METHOD_NOT_IMPLEMENTED",
+  "ERR_STREAM_PREMATURE_CLOSE",
+  "ERR_STREAM_DESTROYED",
+  "ERR_SOCKET_CLOSED",
+]);
+const UPLOAD_DIAGNOSTIC_NAMES = new Set([
+  "Error",
+  "TypeError",
+  "RangeError",
+  "CastError",
+  "RPCError",
+  "BadRequestError",
+  "UnauthorizedError",
+  "ForbiddenError",
+  "AuthKeyError",
+  "ServerError",
+  "TimedOutError",
+  "FileMigrateError",
+  "FloodWaitError",
+  "FloodTestPhoneWaitError",
+  "SlowModeWaitError",
+  "TimeoutError",
+  "AbortError",
+  "QuotaExceededError",
+]);
+const UPLOAD_DIAGNOSTIC_FIXED_MESSAGES = new Map([
+  ["Maximum reconnection retries reached. Aborting!", "RECONNECT_EXHAUSTED"],
+  ["NetSocket was closed", "SOCKET_CLOSED"],
+  ["Not connected", "TRANSPORT_DISCONNECTED"],
+  ["Auth key unset", "AUTH_KEY_UNSET"],
+  ["Auth key not set", "AUTH_KEY_UNSET"],
+  ["Unset AuthKey", "AUTH_KEY_UNSET"],
+  ["Not a valid string", "INVALID_SESSION_FORMAT"],
+  ["MTPROTO_ABORTED", "DISPATCH_ABORTED"],
+  ["MTPROTO_DISCONNECT_FAILED", "DISCONNECT_FAILED"],
+]);
+
+/** Fixed metadata only: raw exceptions may contain request bytes and credentials. */
+export function photoUploadFailureDiagnostic(error: unknown) {
+  let reason: string = getTelegramWait(error)?.code ?? "UNKNOWN";
+  let name = "UNKNOWN";
+  try {
+    const problem = error as {
+      errorMessage?: unknown;
+      code?: unknown;
+      name?: unknown;
+    } | null;
+    const rpc = problem?.errorMessage;
+    if (reason === "UNKNOWN" && typeof rpc === "string") {
+      if (UPLOAD_DIAGNOSTIC_RPC_CODES.has(rpc)) reason = rpc;
+      else if (/^FLOOD_(?:PREMIUM_)?WAIT(?:_\d+)?$/.test(rpc))
+        reason = "FLOOD_WAIT";
+      else if (/^FILE_MIGRATE_\d+$/.test(rpc)) reason = "FILE_MIGRATE";
+      else if (/^FILE_PART_\d+_MISSING$/.test(rpc))
+        reason = "FILE_PART_MISSING";
+    }
+    if (
+      reason === "UNKNOWN" &&
+      typeof problem?.code === "string" &&
+      UPLOAD_DIAGNOSTIC_SYSTEM_CODES.has(problem.code)
+    )
+      reason = problem.code;
+    if (
+      reason === "UNKNOWN" &&
+      error instanceof Error &&
+      error.message === "Request was unsuccessful 1 time(s)"
+    )
+      reason = "SDK_RETRY_EXHAUSTED";
+    if (reason === "UNKNOWN") {
+      const fixedMessage =
+        typeof error === "string"
+          ? error
+          : error instanceof Error
+            ? error.message
+            : undefined;
+      if (fixedMessage !== undefined)
+        reason = UPLOAD_DIAGNOSTIC_FIXED_MESSAGES.get(fixedMessage) ?? reason;
+    }
+    if (
+      typeof problem?.name === "string" &&
+      UPLOAD_DIAGNOSTIC_NAMES.has(problem.name)
+    )
+      name = problem.name;
+  } catch {
+    // Malformed metadata/getters must not make error reporting throw.
+  }
+  return {
+    event: "telegram_media_failure",
+    stage: "upload_part",
+    reason,
+    name,
+  } as const;
+}
+
+export function phoneResolutionFailureDiagnostic(
+  stage: "connect" | "resolve_phone",
+  error: unknown
+) {
+  const { reason, name } = photoUploadFailureDiagnostic(error);
+  return {
+    event: "telegram_phone_resolution_failure",
+    stage,
+    reason,
+    name,
+  } as const;
+}
+
 async function sendBot(request: DeliveryRequest) {
   if (request.photoId || request.photoSha256)
     throw new DeliveryError("content", "BOT_PHOTO_UNSUPPORTED");
@@ -212,7 +355,9 @@ async function uploadPhoto(
 ): Promise<Api.InputMediaUploadedPhoto> {
   // Avoid GramJS uploadFile/sendFile: their upload retry loop may sleep through
   // an abort, and sendFile creates a different logical-message randomId.
-  const partSize = 128 * 1024;
+  // Native Workers probes accepted 32 KiB parts; 128 KiB encoded correctly but
+  // disconnected during upload. Keep the size verified on the deployed runtime.
+  const partSize = 32 * 1024;
   const parts = Math.ceil(photo.bytes.length / partSize);
   const fileId = bigInt(
     (randomBytes(8).readBigUInt64BE() & 0x7fffffffffffffffn || 1n).toString()
@@ -230,6 +375,7 @@ async function uploadPhoto(
       );
     } catch (error) {
       ensureActive();
+      console.warn(JSON.stringify(photoUploadFailureDiagnostic(error)));
       const classified = classifyMtprotoError(error);
       if (classified instanceof DeliveryError) throw classified;
       // No messages.SendMedia has been issued, so this failure is safe to retry.
@@ -326,19 +472,31 @@ async function sendMtproto(request: DeliveryRequest) {
   const ensureActive = () => {
     if (aborted || request.signal.aborted) throw new Error("MTPROTO_ABORTED");
   };
+  let phoneStage: "connect" | "resolve_phone" | undefined;
+  const reportPhoneFailure = (error: unknown) => {
+    if (!phoneStage) return;
+    const stage = phoneStage;
+    phoneStage = undefined;
+    console.warn(
+      JSON.stringify(phoneResolutionFailureDiagnostic(stage, error))
+    );
+  };
   try {
     ensureActive();
     const operation = (async () => {
+      if (request.recipient.startsWith("phone:")) phoneStage = "connect";
       await client.connect();
       ensureActive();
       let peer: Api.TypeInputPeer;
       try {
         if (request.recipient.startsWith("phone:")) {
+          phoneStage = "resolve_phone";
           peer = await resolvePhonePeer(
             client,
             request.recipient.slice(6),
             ensureActive
           );
+          phoneStage = undefined;
         } else {
           const target = request.recipient.startsWith("chat:")
             ? bigInt(request.recipient.slice(5))
@@ -346,6 +504,7 @@ async function sendMtproto(request: DeliveryRequest) {
           peer = await client.getInputEntity(target);
         }
       } catch (e) {
+        reportPhoneFailure(e);
         ensureActive();
         if (e instanceof DeliveryError) throw e;
         const classified = classifyMtprotoError(e);
@@ -413,6 +572,7 @@ async function sendMtproto(request: DeliveryRequest) {
     })();
     return await Promise.race([operation, abortPromise]);
   } catch (e) {
+    reportPhoneFailure(e);
     if (e instanceof DeliveryError) throw e;
     throw classifyMtprotoError(e);
   } finally {

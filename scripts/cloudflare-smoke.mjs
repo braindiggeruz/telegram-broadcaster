@@ -217,10 +217,111 @@ async function run() {
     await readFile(configFile, "utf8")
   );
   if (parsed.error) throw new SmokeError("worker_configuration_invalid");
+  // Keep synthetic TL probes out of the production Worker. This entry exists
+  // only in the isolated CI directory and never connects to Telegram.
+  const encodingEntry = resolve(directory, "encoding-entry.ts");
+  await writeFile(
+    encodingEntry,
+    `import worker from "../../cloudflare/index.ts";
+import { Api } from "telegram";
+import bigInt from "big-integer";
+import { Buffer } from "node:buffer";
+import { RPCMessageToError } from "telegram/errors/index.js";
+import { classifyMtprotoError } from "../../server/telegramTransport.ts";
+import { DeliveryError } from "../../server/delivery/types.ts";
+
+function encodeUpload(bytes: Buffer) {
+  const request = new Api.upload.SaveFilePart({
+    fileId: bigInt("9223372036854775806"),
+    filePart: 7,
+    bytes,
+  });
+  const encoded = request.getBytes();
+  return {
+    inputBuffer: Buffer.isBuffer(bytes),
+    encodedBuffer: Buffer.isBuffer(encoded),
+    byteLength: encoded.length,
+    constructorMatches: encoded.readUInt32LE(0) === Api.upload.SaveFilePart.CONSTRUCTOR_ID,
+    fileIdMatches: encoded.readBigInt64LE(4) === 9223372036854775806n,
+    filePartMatches: encoded.readInt32LE(12) === 7,
+    lengthMatches: encoded[16] === 254 && encoded.readUIntLE(17, 3) === 128 * 1024,
+    payloadMatches: encoded.subarray(20, 20 + bytes.length).equals(bytes),
+  };
+}
+
+function classifyWait(rpcCode: string) {
+  // Exercise the actual SDK conversion: specialized wait errors expose the
+  // generic errorMessage FLOOD while retaining the duration in seconds.
+  const error = RPCMessageToError(
+    new Api.RpcError({ errorCode: 420, errorMessage: rpcCode }),
+    new Api.contacts.ResolvePhone({ phone: "19990000000" })
+  );
+  const classified = classifyMtprotoError(error);
+  return {
+    category: classified instanceof DeliveryError ? classified.category : null,
+    code: classified instanceof DeliveryError ? classified.code : null,
+    retryAfterSeconds: classified instanceof DeliveryError ? classified.retryAfterSeconds : null,
+    sdkGenericCodeIsFlood: error.errorMessage === "FLOOD",
+  };
+}
+
+export default {
+  ...worker,
+  async fetch(...args: Parameters<typeof worker.fetch>) {
+    if (new URL(args[0].url).pathname !== "/__encoding-check")
+      return worker.fetch(...args);
+    try {
+      const backing = Buffer.alloc(128 * 1024 + 18, 0xcd);
+      backing.fill(0xab, 7, 7 + 128 * 1024);
+      const offset = backing.subarray(7, 7 + 128 * 1024);
+      const media = new Api.messages.SendMedia({
+        peer: new Api.InputPeerSelf(),
+        media: new Api.InputMediaUploadedPhoto({
+          file: new Api.InputFile({
+            id: bigInt("9223372036854775806"),
+            parts: 1,
+            name: "photo.jpg",
+            md5Checksum: "0123456789abcdef0123456789abcdef",
+          }),
+        }),
+        message: "Synthetic caption",
+        randomId: bigInt("9223372036854775805"),
+      });
+      const encodedMedia = media.getBytes();
+      return Response.json({
+        encodingOnly: true,
+        waits: {
+          flood: classifyWait("FLOOD_WAIT_2090"),
+          premium: classifyWait("FLOOD_PREMIUM_WAIT_120"),
+          slowmode: classifyWait("SLOWMODE_WAIT_70"),
+          testPhone: classifyWait("FLOOD_TEST_PHONE_WAIT_30"),
+        },
+        uploads: {
+          subarray: encodeUpload(Buffer.alloc(128 * 1024, 0xab).subarray(0)),
+          nonzeroOffset: encodeUpload(offset),
+          copied: encodeUpload(Buffer.from(offset)),
+        },
+        sendMedia: {
+          encodedBuffer: Buffer.isBuffer(encodedMedia),
+          byteLength: encodedMedia.length,
+          constructorMatches: encodedMedia.readUInt32LE(0) === Api.messages.SendMedia.CONSTRUCTOR_ID,
+          captionMatches: encodedMedia.includes(Buffer.from("Synthetic caption")),
+          randomIdMatches: encodedMedia.readBigInt64LE(encodedMedia.length - 8) === 9223372036854775805n,
+          stableEncoding: encodedMedia.equals(media.getBytes()),
+        },
+      });
+    } catch {
+      return Response.json({ error: "SYNTHETIC_TL_ENCODING_FAILED" }, { status: 500 });
+    }
+  },
+};
+`,
+    { mode: 0o600, flag: "wx" }
+  );
   const config = {
     ...parsed.config,
     name: "tg-sender-ci",
-    main: resolve(root, "cloudflare/index.ts"),
+    main: encodingEntry,
     assets: {
       ...parsed.config.assets,
       directory: resolve(root, "dist/public"),
@@ -236,6 +337,7 @@ async function run() {
                   ? parsed.config.assets.run_worker_first
                   : []),
                 "/__scheduled",
+                "/__encoding-check",
               ]),
             ],
     },
@@ -289,6 +391,53 @@ async function run() {
     if (!alive) await delay(1000, undefined, { signal: cancellation.signal });
   }
   check("native_workerd_health", alive);
+  stage = "native_tl_encoding";
+  const encodingResponse = await fetch(`${base}/__encoding-check`, {
+    signal: signal(),
+  });
+  const encoding = await encodingResponse.json();
+  check(
+    "native_telegram_encoding_synthetic",
+    encodingResponse.ok && encoding.encodingOnly === true
+  );
+  for (const name of ["subarray", "nonzeroOffset", "copied"]) {
+    const upload = encoding.uploads?.[name];
+    check(
+      `native_telegram_upload_encoding_${name}`,
+      upload?.byteLength === 131092 &&
+        upload.inputBuffer === true &&
+        upload.encodedBuffer === true &&
+        upload.constructorMatches === true &&
+        upload.fileIdMatches === true &&
+        upload.filePartMatches === true &&
+        upload.lengthMatches === true &&
+        upload.payloadMatches === true
+    );
+  }
+  check(
+    "native_telegram_send_media_encoding",
+    encoding.sendMedia?.byteLength > 0 &&
+      encoding.sendMedia.encodedBuffer === true &&
+      encoding.sendMedia.constructorMatches === true &&
+      encoding.sendMedia.captionMatches === true &&
+      encoding.sendMedia.randomIdMatches === true &&
+      encoding.sendMedia.stableEncoding === true
+  );
+  for (const [name, category, code, seconds] of [
+    ["flood", "cooldown", "FLOOD_WAIT", 2090],
+    ["premium", "cooldown", "FLOOD_WAIT", 120],
+    ["slowmode", "slowmode", "SLOWMODE_WAIT", 70],
+    ["testPhone", "cooldown", "FLOOD_WAIT", 30],
+  ]) {
+    const wait = encoding.waits?.[name];
+    check(
+      `native_telegram_sdk_wait_${name}`,
+      wait?.sdkGenericCodeIsFlood === true &&
+        wait.category === category &&
+        wait.code === code &&
+        wait.retryAfterSeconds === seconds
+    );
+  }
   stage = "http_and_cron";
 
   const html = await fetch(base, { signal: signal() });

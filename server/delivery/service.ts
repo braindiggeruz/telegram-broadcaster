@@ -170,13 +170,26 @@ export class DeliveryService {
       COUNT(*) FILTER(WHERE d.state='accepted')::int AS accepted,
       COUNT(*) FILTER(WHERE d.state='dry_run')::int AS dry_run,
       COUNT(*) FILTER(WHERE d.state='pending')::int AS pending,
+      COUNT(*) FILTER(WHERE d.state='pending' AND EXISTS(
+        SELECT 1 FROM delivery_attempts a WHERE a.id=d.attempt_id AND a.state='deferred'
+      ))::int AS retry_pending,
       COUNT(*) FILTER(WHERE d.state='inflight')::int AS inflight,
       COUNT(*) FILTER(WHERE d.state='failed')::int AS failed,
       COUNT(*) FILTER(WHERE d.state='suppressed')::int AS suppressed,
       COUNT(*) FILTER(WHERE d.state='unknown')::int AS unknown,
       COUNT(*) FILTER(WHERE d.state='cancelled')::int AS cancelled,
       COUNT(*) FILTER(WHERE d.state='expired')::int AS expired,
-      MIN(d.available_at) FILTER(WHERE d.state='pending') AS next_delivery_at
+      MIN(d.available_at) FILTER(WHERE d.state='pending') AS next_delivery_at,
+      CASE WHEN c.status IN ('queued','running') AND
+        (c.expires_at IS NULL OR c.expires_at>now()) AND
+        (c.is_dry_run OR s.state IN ('READY','COOLDOWN'))
+        THEN MIN(GREATEST(d.available_at,c.scheduled_at,
+          CASE WHEN NOT c.is_dry_run THEN s.next_send_at END,
+          CASE WHEN NOT c.is_dry_run THEN s.cooldown_until END
+        )) FILTER(WHERE d.state='pending' AND EXISTS(
+          SELECT 1 FROM delivery_attempts a WHERE a.id=d.attempt_id AND a.state='deferred'
+        )) ELSE NULL END AS next_attempt_at,
+      COALESCE(MAX(d.updated_at),c.created_at) AS last_activity_at
       FROM delivery_campaigns c JOIN sender_controls s ON s.sender_key=c.sender_key LEFT JOIN deliveries d ON d.campaign_id=c.id
       WHERE c.owner_id=$1 AND c.kind=$2 AND c.broadcast_id=$3 GROUP BY c.id,s.sender_key`,
       [ownerId, kind, broadcastId]
@@ -196,6 +209,8 @@ export class DeliveryService {
       failed: row.failed as number,
       failedCount: row.failed as number,
       pending: row.pending as number,
+      // A subset of pending, never an additional delivered/terminal count.
+      retryPending: row.retry_pending as number,
       inflight: row.inflight as number,
       suppressed: row.suppressed as number,
       unknown: row.unknown as number,
@@ -207,6 +222,8 @@ export class DeliveryService {
       cancelRequestedAt: row.cancel_requested_at as Date | null,
       completedAt: row.completed_at as Date | null,
       nextDeliveryAt: row.next_delivery_at as Date | null,
+      nextAttemptAt: row.next_attempt_at as Date | null,
+      lastActivityAt: row.last_activity_at as Date,
       sender: {
         state: row.sender_state as string,
         cooldownUntil: row.cooldown_until as Date | null,
