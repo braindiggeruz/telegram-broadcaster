@@ -7,6 +7,8 @@ import {
 } from "./delivery";
 import { telegramTransport } from "./telegramTransport";
 
+import { tickLeadRadarInbox } from "./delivery/leadRadarInbox";
+
 const WORKER_ID = "cloudflare-cron";
 
 interface BatchWork {
@@ -56,6 +58,10 @@ export async function runScheduledBatch() {
     try {
       await heartbeat();
       await tickAutomations();
+      await tickLeadRadarInbox({
+        pool,
+        deadline: Math.min(deadline, Date.now() + 15000),
+      });
       const result = await runBoundedDeliveryBatch({
         deadline,
         heartbeat,

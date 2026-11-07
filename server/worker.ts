@@ -8,6 +8,7 @@ import {
 } from "./delivery";
 import { telegramTransport } from "./telegramTransport";
 import { tickAutomations } from "./automation";
+import { tickLeadRadarInbox } from "./delivery/leadRadarInbox";
 import { tickMaintenance } from "./maintenance";
 
 const workerId = `worker-${randomUUID()}`;
@@ -22,6 +23,7 @@ process.once("SIGINT", () => {
 
 async function main() {
   const pool = getPool();
+  let lastInboxTick = 0;
   let maintenanceTask: Promise<unknown> | undefined;
   const maintenanceAbort = new AbortController();
   const maintenance = setInterval(() => {
@@ -42,6 +44,10 @@ async function main() {
       try {
         await recordWorkerHeartbeat(pool, workerId, liveSendEnabled);
         await tickAutomations();
+        if (Date.now() - lastInboxTick >= 60000) {
+          lastInboxTick = Date.now();
+          await tickLeadRadarInbox({ pool, deadline: Date.now() + 15000 });
+        }
         const result = await runWorkerOnce({
           pool,
           transport: telegramTransport,

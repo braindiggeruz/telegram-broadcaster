@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { getPool } from "../connection";
 import { getPhotoMetadata } from "../media";
+import { leadRadarOwnsSender } from "./leadRadarEffects";
 import {
   DeliveryError,
   safeCode,
@@ -521,6 +522,8 @@ export async function runWorkerOnce(
       (c.status IN ('queued','running','stopping') OR EXISTS(SELECT 1 FROM deliveries d WHERE d.campaign_id=c.id AND d.state='inflight')))
     ORDER BY s.next_send_at,s.updated_at,s.sender_key LIMIT 100`);
   for (const { sender_key: key } of candidates.rows) {
+    const [owner, kind] = String(key).split(":");
+    if (leadRadarOwnsSender(Number(owner), kind)) continue;
     if (!dispatchWindowOpen(options)) break;
     const client = await pool.connect();
     let locked = false;

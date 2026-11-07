@@ -7,6 +7,7 @@ import { registerAutomationWebhook } from "../automation";
 import { registerTelegramWebhook } from "../telegramWebhook";
 import { registerAudienceSourceWebhook } from "../audienceSource";
 import { registerMediaRoutes } from "../media";
+import { registerLeadRadarIntegration } from "../leadRadarIntegration";
 
 export const securityHeaders = {
   "X-Content-Type-Options": "nosniff",
@@ -41,6 +42,7 @@ export function createApp() {
   registerTelegramWebhook(app);
   registerAudienceSourceWebhook(app);
   registerMediaRoutes(app);
+  registerLeadRadarIntegration(app);
   app.use(
     "/api/trpc",
     (_req, res, next) => {

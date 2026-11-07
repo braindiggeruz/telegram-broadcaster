@@ -20,6 +20,9 @@
     // Expected origin for the verified account subdomain; this file does not deploy it.
     "APP_ORIGIN": "https://tg-sender-v2.braindigger-uz.workers.dev",
     "LIVE_SEND_ENABLED": "true",
+    "LEAD_RADAR_INTEGRATION_ENABLED": "false",
+    "LEAD_RADAR_PUBLIC_BUSINESS_INQUIRY_ENABLED": "false",
+    "LEAD_RADAR_INBOX_ENABLED": "false",
     "WORKER_MODE": "scheduled",
     "DATABASE_SSL": "verify-full",
     "DATABASE_TRANSPORT": "supabase-relay",

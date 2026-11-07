@@ -9,6 +9,16 @@ import { normalizeRecipient } from "./delivery/types";
 import { senderFingerprint } from "./senderIdentity";
 import { getPhotoMetadata, requirePhotoMetadata } from "./media";
 import { PHOTO_CAPTION_MAX_LENGTH } from "../shared/media";
+import { leadRadarOwnsSender } from "./delivery/leadRadarEffects";
+
+export function assertLegacyCampaignSender(ownerId: number, kind: SenderKind) {
+  if (leadRadarOwnsSender(ownerId, kind))
+    throw new TRPCError({
+      code: "CONFLICT",
+      message:
+        "Этот аккаунт управляется Lead Radar. Создавайте и запускайте кампанию в радаре; существующая история сохранена.",
+    });
+}
 
 export interface CampaignInput {
   name: string;
@@ -55,6 +65,7 @@ export async function createCampaign(
   explicitRecipients?: string[],
   expectedSenderFingerprint?: string | null
 ) {
+  assertLegacyCampaignSender(ownerId, kind);
   validateCampaignContent(kind, input.message, input.photoId);
   // Resolve ownership before any campaign/audit writes, including an idempotent retry.
   const photo = input.photoId
@@ -172,6 +183,7 @@ export async function launchCampaign(
   kind: SenderKind,
   id: number
 ) {
+  assertLegacyCampaignSender(ownerId, kind);
   const bc: CampaignBroadcast | null =
     kind === "bot"
       ? await db.getBroadcast(id, ownerId)

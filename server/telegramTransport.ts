@@ -489,7 +489,18 @@ async function sendMtproto(request: DeliveryRequest) {
       ensureActive();
       let peer: Api.TypeInputPeer;
       try {
-        if (request.recipient.startsWith("phone:")) {
+        if (request.resolvedPeer) {
+          if (
+            !/^[1-9][0-9]{0,19}$/.test(request.resolvedPeer.userId) ||
+            !/^-?[0-9]{1,20}$/.test(request.resolvedPeer.accessHash) ||
+            request.recipient !== `chat:${request.resolvedPeer.userId}`
+          )
+            throw new DeliveryError("recipient", "MTPROTO_PEER_PROOF_INVALID");
+          peer = new Api.InputPeerUser({
+            userId: bigInt(request.resolvedPeer.userId),
+            accessHash: bigInt(request.resolvedPeer.accessHash),
+          });
+        } else if (request.recipient.startsWith("phone:")) {
           phoneStage = "resolve_phone";
           peer = await resolvePhonePeer(
             client,
@@ -577,6 +588,183 @@ async function sendMtproto(request: DeliveryRequest) {
     throw classifyMtprotoError(e);
   } finally {
     request.signal.removeEventListener("abort", abort);
+    await client.destroy();
+  }
+}
+/** Called only while LeadRadarEffects owns the same sender lock as dispatch and credential changes. */
+export async function resolveLeadRadarUsername(
+  ownerId: number,
+  username: string,
+  fingerprint: string,
+  signal: AbortSignal
+) {
+  const session = await getMtprotoSession(ownerId);
+  if (
+    !session?.isActive ||
+    !session.sessionString ||
+    createHash("sha256").update(session.sessionString).digest("hex") !==
+      fingerprint
+  )
+    throw new DeliveryError("auth", "APPROVED_SENDER_CHANGED");
+  if (!/^[a-z][a-z0-9_]{4,31}$/.test(username))
+    throw new DeliveryError("recipient", "INVALID_USERNAME");
+  const { client } = await createClient(session.sessionString);
+  let rejectAbort: (reason: Error) => void = () => {};
+  const abortPromise = new Promise<never>((_resolve, reject) => {
+    rejectAbort = reject;
+  });
+  const abort = () => {
+    void client.destroy().then(
+      () => rejectAbort(new Error("MTPROTO_ABORTED")),
+      () => rejectAbort(new Error("MTPROTO_DISCONNECT_FAILED"))
+    );
+  };
+  signal.addEventListener("abort", abort, { once: true });
+  try {
+    if (signal.aborted) throw new Error("MTPROTO_ABORTED");
+    const operation = (async () => {
+      await client.connect();
+      if (signal.aborted) throw new Error("MTPROTO_ABORTED");
+      const entity = await client.getEntity(`@${username}`);
+      if (signal.aborted) throw new Error("MTPROTO_ABORTED");
+      if (entity instanceof Api.User) {
+        if (entity.bot) return { kind: "bot" as const };
+        if (entity.deleted || !entity.accessHash)
+          return { kind: "unknown" as const };
+        return {
+          kind: "user" as const,
+          userId: entity.id.toString(),
+          accessHash: entity.accessHash.toString(),
+          username: entity.username ?? null,
+        };
+      }
+      if (entity instanceof Api.Channel)
+        return {
+          kind: entity.megagroup ? ("group" as const) : ("channel" as const),
+        };
+      if (entity instanceof Api.Chat) return { kind: "group" as const };
+      return { kind: "unknown" as const };
+    })();
+    return await Promise.race([operation, abortPromise]);
+  } catch (error) {
+    throw error instanceof DeliveryError ? error : classifyMtprotoError(error);
+  } finally {
+    signal.removeEventListener("abort", abort);
+    await client.destroy();
+  }
+}
+/** Explicit connection verification; never called by passive status reads. */
+export async function verifyLeadRadarSession(
+  ownerId: number,
+  fingerprint: string,
+  signal: AbortSignal
+) {
+  const session = await getMtprotoSession(ownerId);
+  if (
+    !session?.isActive ||
+    !session.sessionString ||
+    createHash("sha256").update(session.sessionString).digest("hex") !==
+      fingerprint
+  )
+    throw new DeliveryError("auth", "APPROVED_SENDER_CHANGED");
+  const { client } = await createClient(session.sessionString);
+  let rejectAbort: (reason: Error) => void = () => {};
+  const abortPromise = new Promise<never>((_resolve, reject) => {
+    rejectAbort = reject;
+  });
+  const abort = () => {
+    void client.destroy().then(
+      () => rejectAbort(new Error("MTPROTO_ABORTED")),
+      () => rejectAbort(new Error("MTPROTO_DISCONNECT_FAILED"))
+    );
+  };
+  signal.addEventListener("abort", abort, { once: true });
+  try {
+    if (signal.aborted) throw new Error("MTPROTO_ABORTED");
+    const operation = (async () => {
+      await client.connect();
+      if (signal.aborted) throw new Error("MTPROTO_ABORTED");
+      const me = await client.getMe();
+      if (!(me instanceof Api.User) || me.bot || me.deleted || signal.aborted)
+        throw new DeliveryError("auth", "MTPROTO_ACCOUNT_UNAVAILABLE");
+    })();
+    await Promise.race([operation, abortPromise]);
+  } catch (error) {
+    throw error instanceof DeliveryError ? error : classifyMtprotoError(error);
+  } finally {
+    signal.removeEventListener("abort", abort);
+    await client.destroy();
+  }
+}
+/** Reads at most one page from one already-contacted private peer; never lists dialogs or imports contacts. */
+export async function readLeadRadarReplies(input: {
+  ownerId: number;
+  fingerprint: string;
+  peer: { userId: string; accessHash: string };
+  minMessageId: string;
+  limit: number;
+  signal: AbortSignal;
+}) {
+  const session = await getMtprotoSession(input.ownerId);
+  if (
+    !session?.isActive ||
+    !session.sessionString ||
+    createHash("sha256").update(session.sessionString).digest("hex") !==
+      input.fingerprint
+  )
+    throw new DeliveryError("auth", "APPROVED_SENDER_CHANGED");
+  if (
+    !/^[1-9][0-9]{0,19}$/.test(input.peer.userId) ||
+    !/^-?[0-9]{1,20}$/.test(input.peer.accessHash) ||
+    !/^[1-9][0-9]{0,9}$/.test(input.minMessageId) ||
+    Number(input.minMessageId) > 2147483647
+  )
+    throw new DeliveryError("recipient", "MTPROTO_PEER_PROOF_INVALID");
+  const { client } = await createClient(session.sessionString);
+  let rejectAbort: (reason: Error) => void = () => {};
+  const abortPromise = new Promise<never>((_resolve, reject) => {
+    rejectAbort = reject;
+  });
+  const abort = () => {
+    void client.destroy().then(
+      () => rejectAbort(new Error("MTPROTO_ABORTED")),
+      () => rejectAbort(new Error("MTPROTO_DISCONNECT_FAILED"))
+    );
+  };
+  input.signal.addEventListener("abort", abort, { once: true });
+  try {
+    if (input.signal.aborted) throw new Error("MTPROTO_ABORTED");
+    const operation = (async () => {
+      await client.connect();
+      if (input.signal.aborted) throw new Error("MTPROTO_ABORTED");
+      const peer = new Api.InputPeerUser({
+        userId: bigInt(input.peer.userId),
+        accessHash: bigInt(input.peer.accessHash),
+      });
+      const page = await client.getMessages(peer, {
+        minId: Number(input.minMessageId),
+        reverse: true,
+        limit: Math.min(20, Math.max(1, input.limit)),
+      });
+      if (input.signal.aborted) throw new Error("MTPROTO_ABORTED");
+      return page
+        .filter(
+          message =>
+            message.peerId instanceof Api.PeerUser &&
+            message.peerId.userId.toString() === input.peer.userId
+        )
+        .map(message => ({
+          messageId: String(message.id),
+          occurredAt: new Date(message.date * 1000).toISOString(),
+          text: message.message ?? "",
+          outgoing: Boolean(message.out),
+        }));
+    })();
+    return await Promise.race([operation, abortPromise]);
+  } catch (error) {
+    throw error instanceof DeliveryError ? error : classifyMtprotoError(error);
+  } finally {
+    input.signal.removeEventListener("abort", abort);
     await client.destroy();
   }
 }

@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { requirePhotoMetadata } from "../media";
+import { leadRadarOwnsSender } from "./leadRadarEffects";
 import { PHOTO_CAPTION_MAX_LENGTH } from "../../shared/media";
 import {
   normalizeRecipient,
@@ -31,6 +32,8 @@ export class DeliveryService {
   constructor(readonly pool: Pool) {}
 
   async enqueueCampaign(input: EnqueueInput) {
+    if (leadRadarOwnsSender(input.ownerId, input.kind))
+      throw new Error("LEAD_RADAR_SENDER_OWNED");
     const key = senderKey(input.ownerId, input.kind);
     if (!Number.isSafeInteger(input.broadcastId) || input.broadcastId <= 0)
       throw new Error("INVALID_BROADCAST");

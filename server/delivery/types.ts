@@ -41,6 +41,8 @@ export interface DeliveryRequest {
   signal: AbortSignal;
   /** SHA-256 of the transport credential approved with this campaign. */
   senderFingerprint?: string;
+  /** Internal only: decrypted account-bound proof from the Lead Radar peer vault. Never accept from a public payload. */
+  resolvedPeer?: { userId: string; accessHash: string };
 }
 export interface DeliveryTransport {
   /** Must honor signal. The engine keeps its sender lock until this promise settles. */
